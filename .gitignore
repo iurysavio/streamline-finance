@@ -1,0 +1,28 @@
+# Real financial data and local database files
+/data/
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db-wal
+*.db-shm
+*.egg-info/
+
+# Secrets and local configuration
+/.env
+/.env.*
+!/.env.example
+/.streamlit/secrets.toml
+
+# Python environments, caches, and generated test output
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.py[cod]
+
+# Local operating-system files
+.DS_Store
