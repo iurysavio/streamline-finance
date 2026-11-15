@@ -1,9 +1,10 @@
+import os
 import stat
 from hashlib import sha256
 
 import pytest
 
-from streamline_finance.domain import MovementType, Person, SourceKind
+from streamline_finance.domain import Category, MovementType, Person, SourceKind
 from streamline_finance.importers.nubank import preview_nubank_csv
 from streamline_finance.storage import (
     FinanceRepository,
@@ -57,7 +58,8 @@ def test_confirm_import_persists_exact_values_and_import_metadata(tmp_path) -> N
     assert batches[0].raw_filename == f"{sha256(CSV_ONE).hexdigest()}.csv"
     assert batches[0].person is Person.SELF
     assert batches[0].source_kind is SourceKind.BANK_ACCOUNT
-    assert stat.S_IMODE(database.stat().st_mode) == 0o600
+    if os.name == "posix":
+        assert stat.S_IMODE(database.stat().st_mode) == 0o600
     assert len(transactions) == 2
     assert transactions[0].amount_minor_units == -1234
     assert transactions[0].currency == "BRL"
@@ -65,9 +67,34 @@ def test_confirm_import_persists_exact_values_and_import_metadata(tmp_path) -> N
     assert transactions[0].person is Person.SELF
     assert not database.read_bytes().startswith(CSV_ONE)
     assert (tmp_path / "data" / "raw" / batches[0].raw_filename).read_bytes() == CSV_ONE
-    assert (
-        stat.S_IMODE((tmp_path / "data" / "raw" / batches[0].raw_filename).stat().st_mode) == 0o600
-    )
+    if os.name == "posix":
+        assert (
+            stat.S_IMODE((tmp_path / "data" / "raw" / batches[0].raw_filename).stat().st_mode)
+            == 0o600
+        )
+
+
+def test_category_catalog_migrates_existing_database_and_persists_without_changing_transactions(
+    tmp_path,
+):
+    database = tmp_path / "data" / "db" / "finance.sqlite3"
+    with FinanceRepository(database) as repository:
+        repository.confirm_import(
+            preview(CSV_ONE, source_key="test"), source_key="test", content=CSV_ONE
+        )
+        before = repository.list_transactions()
+        repository._connection.execute("DROP TABLE categories")
+        repository._connection.commit()
+    with FinanceRepository(database) as repository:
+        assert repository.list_transactions() == before
+        repository.add_category(Category("Casa", "Mercado"))
+        with pytest.raises(ValueError):
+            repository.add_category(Category(" casa ", " MERCADO "))
+        with pytest.raises(ValueError):
+            repository.add_category(Category("CASA", "Outro"))
+    with FinanceRepository(database) as repository:
+        assert repository.list_categories() == (Category("Casa", "Mercado"),)
+        assert repository.list_transactions() == before
 
 
 def test_reimporting_same_file_is_idempotent(tmp_path) -> None:
@@ -201,9 +228,10 @@ def test_database_is_created_in_local_data_db_directory(tmp_path) -> None:
     assert database.exists()
     assert database.parent == project_data / "db"
     assert (project_data / "raw").is_dir()
-    assert stat.S_IMODE(database.stat().st_mode) == 0o600
-    assert stat.S_IMODE((project_data / "db").stat().st_mode) == 0o700
-    assert stat.S_IMODE((project_data / "raw").stat().st_mode) == 0o700
+    if os.name == "posix":
+        assert stat.S_IMODE(database.stat().st_mode) == 0o600
+        assert stat.S_IMODE((project_data / "db").stat().st_mode) == 0o700
+        assert stat.S_IMODE((project_data / "raw").stat().st_mode) == 0o700
 
 
 def test_identical_amounts_with_different_transaction_ids_are_preserved(tmp_path) -> None:

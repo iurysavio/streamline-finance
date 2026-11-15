@@ -5,6 +5,7 @@ from streamline_finance.storage import StoredTransaction
 from streamline_finance.ui_summary import (
     build_spending_summary,
     build_spending_trend,
+    category_highlights,
     compare_spending_periods,
     format_brl,
     format_variation_percent,
@@ -178,6 +179,30 @@ def test_period_comparison_handles_zero_baseline_without_infinite_percent() -> N
 
     assert comparison.previous_total_minor_units == 0
     assert comparison.variation_percent is None
+
+
+def test_category_highlights_use_net_amounts_and_same_length_previous_period():
+    rows = [
+        transaction("previous", -5000, MovementType.EXPENSE, "self", "2026-02-01", "A", "Food"),
+        transaction("current", -2000, MovementType.EXPENSE, "self", "2026-02-03", "A", "Food"),
+        transaction("refund", 500, MovementType.EXPENSE, "self", "2026-02-04", "A", "Food"),
+        transaction("other", -3000, MovementType.EXPENSE, "self", "2026-02-03", "B", "Food"),
+        transaction("pending", -90000, MovementType.PENDING, "self", "2026-02-03", None, None),
+    ]
+    assert category_highlights(rows, start=date(2026, 2, 3), end=date(2026, 2, 4)) == (
+        ("B", "Food"),
+        3000,
+        ("A", "Food"),
+        5000,
+        1500,
+    )
+    assert category_highlights([], start=date(2026, 2, 3), end=date(2026, 2, 4)) == (
+        None,
+        0,
+        None,
+        0,
+        0,
+    )
 
 
 def transaction(

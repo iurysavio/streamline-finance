@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import os
 from datetime import date
+from difflib import get_close_matches
 from pathlib import Path
 
-import altair as alt
 import httpx2 as httpx
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
+from streamline_finance.categorization import (
+    CategorizationRule,
+    CategorizationStatus,
+    suggest_description,
+)
 from streamline_finance.demo_data import (
     append_demo_import,
     make_demo_transactions,
@@ -24,6 +30,7 @@ from streamline_finance.ui_summary import (
     PeriodComparison,
     SpendingTrendPoint,
     build_spending_trend,
+    category_highlights,
     compare_spending_periods,
     format_brl,
     top_expenses,
@@ -31,6 +38,7 @@ from streamline_finance.ui_summary import (
 
 DEFAULT_API_URL = "http://127.0.0.1:8000"
 HISTORICAL_WORKBOOK_CANDIDATES = (
+    Path("data/historical/ControleFinanceiro_VR.xlsx"),
     Path("data/historical/ControleFinanceiro_VR-2.xlsx"),
     Path("data/reference/ControleFinanceiro.xlsx"),
 )
@@ -135,7 +143,7 @@ def render_analysis_page() -> None:
 
     today = date.today()
     default_start = (
-        date(today.year - 1, today.month, 1) if today.month > 1 else date(today.year - 1, 1, 1)
+        date(today.year, today.month, 1) if today.month > 1 else date(today.year, 1, 1)
     )
     date_col, person_col = st.columns([2, 1])
     selected_dates = date_col.date_input(
@@ -174,7 +182,34 @@ def render_analysis_page() -> None:
         dimension="total",
     )
     total_minor = sum(point.amount_minor_units for point in total_points)
-    st.metric("Gastos confirmados", format_brl(total_minor))
+    largest_category, largest_amount, best_category, previous_amount, current_amount = (
+        category_highlights(filtered, start=start, end=end)
+    )
+    all_expenses = top_expenses(filtered, start=start, end=end, limit=None)
+    cards = st.columns(4)
+    cards[0].metric("Gastos confirmados", format_brl(total_minor))
+    cards[1].metric(
+        "Maior microcategoria",
+        format_brl(largest_amount) if largest_category else "—",
+        help=" / ".join(largest_category) if largest_category else "Sem categoria no período",
+    )
+    if largest_category:
+        cards[1].caption(" / ".join(largest_category))
+    cards[2].metric(
+        "Maior economia", format_brl(previous_amount - current_amount) if best_category else "—"
+    )
+    if best_category:
+        cards[2].caption(
+            f"{' / '.join(best_category)}: {format_brl(previous_amount)} → "
+            f"{format_brl(current_amount)}"
+        )
+    else:
+        cards[2].caption("Nenhuma redução no período")
+    cards[3].metric(
+        "Maior despesa", format_brl(all_expenses[0].amount_minor_units) if all_expenses else "—"
+    )
+    if all_expenses:
+        cards[3].caption(_split_description(all_expenses[0].description)[1])
 
     control_col, dimension_col = st.columns(2)
     granularity_label = control_col.radio(
@@ -211,7 +246,7 @@ def render_analysis_page() -> None:
         st.info("Nenhum gasto confirmado neste período e filtro.")
     else:
         chart = _trend_chart(trend, granularity, dimension)
-        st.altair_chart(chart, width="stretch", theme="streamlit")
+        st.plotly_chart(chart, width="stretch", config={"scrollZoom": False, "displaylogo": False})
         if dimension == "person":
             st.caption("Selecione uma pessoa no filtro para isolar seus gastos.")
         elif dimension in {"macro", "micro"}:
@@ -219,38 +254,10 @@ def render_analysis_page() -> None:
 
     st.subheader(
         "📋 Maiores gastos no período",
-        help=(
-            "Dez maiores transações individuais no intervalo/pessoa selecionados. "
-            "Estornos não entram."
-        ),
+        help=("Transações individuais no intervalo/pessoa selecionados. Estornos não entram."),
     )
-    if _mode() == "demo":
-        expenses = top_expenses(
-            filtered,
-            start=start,
-            end=end,
-            person=_person_map()[person_choice].value if person_choice != "Todos" else None,
-            limit=10,
-        )
-    else:
-        top_response = _api_get(
-            "/reports/top-expenses",
-            start=start.isoformat(),
-            end=end.isoformat(),
-            person=_person_map()[person_choice].value if person_choice != "Todos" else None,
-            limit=10,
-        )
-        expenses = (
-            top_response.json()["expenses"]
-            if top_response is not None and top_response.status_code == 200
-            else ()
-        )
-    if expenses:
-        st.dataframe(
-            _top_expense_rows(expenses),
-            width="stretch",
-            hide_index=True,
-        )
+    if all_expenses:
+        _expense_table(all_expenses, start, end)
     else:
         st.info("Nenhum gasto individual no período selecionado.")
 
@@ -274,12 +281,8 @@ def render_analysis_page() -> None:
         format_brl(comparison.previous_total_minor_units),
     )
     _render_variation_card(comparison_col3, comparison.variation_percent)
-    st.altair_chart(
-        _period_comparison_chart(comparison).properties(
-            title="Gasto líquido entre períodos iguais"
-        ),
-        width="stretch",
-        theme="streamlit",
+    st.plotly_chart(
+        _period_comparison_chart(comparison), width="stretch", config={"displaylogo": False}
     )
 
     if _mode() == "demo":
@@ -326,57 +329,29 @@ def uncategorized_expenses(
     )
 
 
-def _period_comparison_chart(comparison: PeriodComparison) -> alt.Chart:
-    frame = pd.DataFrame(
-        [
-            {
-                "Período": "Anterior",
-                "Valor centavos": comparison.previous_total_minor_units,
-                "Rótulo": format_brl(comparison.previous_total_minor_units),
-            },
-            {
-                "Período": "Selecionado",
-                "Valor centavos": comparison.current_total_minor_units,
-                "Rótulo": format_brl(comparison.current_total_minor_units),
-            },
-        ]
-    )
-    bars = (
-        alt.Chart(frame)
-        .mark_bar(
-            cornerRadiusTopLeft=5,
-            cornerRadiusTopRight=5,
-            color="#4F8BF9",
-            opacity=0.95,
-        )
-        .encode(
-            x=alt.X("Período:N", title=None),
-            y=alt.Y(
-                "Valor centavos:Q",
-                title="Gasto líquido (R$)",
-                scale=alt.Scale(domainMin=0),
-                axis=alt.Axis(labelExpr="'R$ ' + format(datum.value / 100, ',.2f')"),
-            ),
-            tooltip=[alt.Tooltip("Período:N"), alt.Tooltip("Rótulo:N", title="Valor")],
+def _period_comparison_chart(comparison: PeriodComparison) -> go.Figure:
+    values = [comparison.previous_total_minor_units, comparison.current_total_minor_units]
+    labels = [format_brl(value) for value in values]
+    figure = go.Figure(
+        go.Bar(
+            x=["Anterior", "Selecionado"],
+            y=[v / 100 for v in values],
+            text=labels,
+            customdata=labels,
+            textposition="outside",
+            marker_color="#4F8BF9",
+            hovertemplate="%{x}<br>%{customdata}<extra></extra>",
         )
     )
-    labels = (
-        alt.Chart(frame)
-        .mark_text(
-            dy=-10,
-            fontWeight="bold",
-            color="#F8FAFC",
-            fontSize=14,
-            stroke="#111827",
-            strokeWidth=0.25,
-        )
-        .encode(
-            x=alt.X("Período:N"),
-            y=alt.Y("Valor centavos:Q", scale=alt.Scale(domainMin=0)),
-            text=alt.Text("Rótulo:N"),
-        )
+    figure.update_layout(
+        title="Gasto líquido entre períodos iguais",
+        height=300,
+        separators=",.",
+        yaxis_title="Gasto líquido (R$)",
+        yaxis_rangemode="tozero",
     )
-    return alt.layer(bars, labels).properties(height=260, padding={"top": 18})
+    figure.update_yaxes(tickprefix="R$ ", tickformat=",.2f")
+    return figure
 
 
 def _top_expense_rows(expenses) -> list[dict[str, str]]:
@@ -384,12 +359,14 @@ def _top_expense_rows(expenses) -> list[dict[str, str]]:
     for item in expenses:
         get = item.get if isinstance(item, dict) else lambda key: getattr(item, key)
         occurred_on = get("occurred_on")
+        payment, description = _split_description(get("description"))
         rows.append(
             {
                 "Data": occurred_on.isoformat()
                 if hasattr(occurred_on, "isoformat")
                 else occurred_on,
-                "Descrição": get("description"),
+                "Tipo de pagamento": payment,
+                "Descrição": description,
                 "Pessoa": _person_label(get("person")),
                 "Macro": get("category_macro"),
                 "Micro": get("category_micro"),
@@ -397,6 +374,60 @@ def _top_expense_rows(expenses) -> list[dict[str, str]]:
             }
         )
     return rows
+
+
+def _split_description(description: str) -> tuple[str, str]:
+    payment, separator, detail = description.partition(" - ")
+    return (
+        (payment.strip(), detail.strip())
+        if separator and detail.strip()
+        else ("Não informado", description)
+    )
+
+
+def _expense_table(expenses, start: date, end: date) -> None:
+    rows = _top_expense_rows(expenses)
+    frame = pd.DataFrame(rows)
+    frame["_centavos"] = [item.amount_minor_units for item in expenses]
+    with st.expander("Filtrar despesas"):
+        dates = st.date_input(
+            "Data da despesa",
+            value=(start, end),
+            min_value=start,
+            max_value=end,
+            key="expense_dates",
+        )
+        text = st.text_input("Buscar descrição", key="expense_description")
+        selections = {
+            column: st.multiselect(
+                column, sorted(frame[column].unique()), key=f"expense-filter-{column}"
+            )
+            for column in ("Tipo de pagamento", "Pessoa", "Macro", "Micro")
+        }
+        minimum = st.number_input(
+            "Valor mínimo (R$)", min_value=0.0, value=0.0, step=1.0, key="expense_min"
+        )
+        maximum = st.number_input(
+            "Valor máximo (R$; 0 = sem limite)",
+            min_value=0.0,
+            value=0.0,
+            step=1.0,
+            key="expense_max",
+        )
+    if isinstance(dates, tuple) and len(dates) == 2:
+        frame = frame[frame["Data"].between(dates[0].isoformat(), dates[1].isoformat())]
+    if text:
+        frame = frame[frame["Descrição"].str.contains(text, case=False, regex=False)]
+    for column, selected in selections.items():
+        if selected:
+            frame = frame[frame[column].isin(selected)]
+    from decimal import Decimal
+
+    frame = frame[frame["_centavos"] >= int(Decimal(str(minimum)) * 100)]
+    if maximum:
+        frame = frame[frame["_centavos"] <= int(Decimal(str(maximum)) * 100)]
+    st.caption(f"{len(frame)} despesa(s) encontrada(s).")
+    st.dataframe(frame.drop(columns="_centavos"), width="stretch", hide_index=True)
 
 
 def _variation_card_presentation(
@@ -441,60 +472,25 @@ def _trend_chart(
     points: tuple[SpendingTrendPoint, ...],
     granularity: str,
     dimension: str,
-) -> alt.Chart:
-    frame = pd.DataFrame(
-        [
-            {
-                "Período": pd.to_datetime(point.period),
-                "Grupo": _person_label(point.group) if dimension == "person" else point.group,
-                "Valor (centavos)": point.amount_minor_units,
-            }
-            for point in points
-        ]
-    )
-    interval_selection = alt.selection_interval(encodings=["x"])
-    if granularity == "month":
-        time_unit = "yearmonth"
-        axis_format = "%b %Y"
-    elif granularity == "week":
-        time_unit = "yearmonthdate"
-        axis_format = "%d %b"
-    else:
-        time_unit = "yearmonthdate"
-        axis_format = "%d %b"
-    base = alt.Chart(frame).encode(
-        x=alt.X(
-            f"{time_unit}(Período):T",
-            title=granularity.capitalize(),
-            axis=alt.Axis(format=axis_format, labelAngle=-35),
-        ),
-        y=alt.Y(
-            "sum(Valor (centavos)):Q",
-            title="Gasto líquido (R$)",
-            axis=alt.Axis(labelExpr="'R$ ' + format(datum.value / 100, ',.2f')"),
-        ),
-        tooltip=[
-            alt.Tooltip(f"{time_unit}(Período):T", title="Período", format=axis_format),
-            alt.Tooltip("Grupo:N", title="Detalhamento"),
-            alt.Tooltip(
-                "sum(Valor (centavos)):Q",
-                title="Gastos (centavos)",
-                format=",.0f",
-            ),
-        ],
-    )
-    if dimension == "total":
-        chart = base.mark_area(point=True, line=True, opacity=0.4)
-    else:
-        chart = base.mark_line(point=True).encode(
-            color=alt.Color("Grupo:N", title=dimension.capitalize())
+) -> go.Figure:
+    figure = go.Figure()
+    for group in sorted({point.group for point in points}):
+        series = [point for point in points if point.group == group]
+        figure.add_scatter(
+            x=[
+                point.period + "-01" if granularity == "month" else point.period for point in series
+            ],
+            y=[point.amount_minor_units / 100 for point in series],
+            customdata=[format_brl(point.amount_minor_units) for point in series],
+            name=_person_label(group) if dimension == "person" else group,
+            mode="lines+markers",
+            hovertemplate="%{x|%d/%m/%Y}<br>%{customdata}<extra>%{fullData.name}</extra>",
         )
-    return (
-        chart.add_params(interval_selection)
-        .interactive()
-        .properties(height=380)
-        .configure_view(strokeOpacity=0)
+    figure.update_layout(
+        height=380, separators=",.", yaxis_title="Gasto líquido (R$)", hovermode="closest"
     )
+    figure.update_yaxes(tickprefix="R$ ", tickformat=",.2f")
+    return figure
 
 
 def render_import_page() -> None:
@@ -582,6 +578,7 @@ def _render_real_import() -> None:
     )
     source_kind_label = st.selectbox("Tipo da origem", ("Conta bancária", "Cartão de crédito"))
     uploaded = st.file_uploader("Arquivo CSV", type=["csv"])
+    rules = _review_rules()
     person = _person_map()[person_label].value
     source_kind = {
         "Conta bancária": SourceKind.BANK_ACCOUNT.value,
@@ -626,10 +623,10 @@ def _render_real_import() -> None:
     ):
         st.warning("A prévia aberta usa escolhas diferentes. Gere outra prévia antes de confirmar.")
         return
-    _render_preview_and_confirmation(preview)
+    _render_preview_and_confirmation(preview, rules)
 
 
-def _render_preview_and_confirmation(preview: dict) -> None:
+def _render_preview_and_confirmation(preview: dict, rules: list[CategorizationRule]) -> None:
     payload = preview["response"]
     st.subheader("Prévia antes de salvar")
     st.write(f"Linhas válidas: {payload['transaction_count']}")
@@ -646,6 +643,7 @@ def _render_preview_and_confirmation(preview: dict) -> None:
                     "Descrição": row["description"],
                     "Valor": format_brl(row["amount_minor_units"]),
                     "Natureza": "Pendente de revisão",
+                    "Categoria sugerida (se despesa)": _suggestion_label(row["description"], rules),
                     "Pessoa": _person_label(row["person"]),
                 }
                 for row in payload["transactions"]
@@ -711,6 +709,9 @@ def render_review_page() -> None:
 
 def _render_demo_review_controls() -> None:
     transactions = _demo_transactions()
+    categories = {row.category for row in transactions if row.category is not None}
+    categories.update(st.session_state.get("demo_categories", []))
+    _category_management(categories, demo=True)
     pending = [row for row in transactions if row.movement_type is MovementType.PENDING]
     only_uncategorized = st.session_state.pop("review_uncategorized_only", False)
     if only_uncategorized:
@@ -733,8 +734,7 @@ def _render_demo_review_controls() -> None:
     kind_label = st.selectbox("Natureza confirmada", ("Despesa", "Entrada", "Transferência"))
     macro = micro = None
     if kind_label == "Despesa":
-        macro = st.text_input("Macro categoria", key="demo_macro")
-        micro = st.text_input("Micro categoria", key="demo_micro")
+        macro, micro = _category_selectors(categories, "demo")
     if st.button("Aplicar somente nesta demonstração"):
         movement_type = {
             "Despesa": MovementType.EXPENSE,
@@ -761,32 +761,9 @@ def _render_real_review() -> None:
     st.header(
         "Revisar despesas sem categoria" if only_uncategorized else "Revisar movimentos pendentes"
     )
-    mapping_confirmed = st.checkbox(
-        "Confirmo o mapeamento provisório: Tipo de Fluxo = macro, Fluxo = micro, "
-        "Classificação = natureza; Observação contém a descrição para regra exata.",
-        key="confirm_category_mapping",
-    )
-    workbook_path = _historical_workbook_path()
-    historical_rules = None
-    if mapping_confirmed and workbook_path is None:
-        st.warning(
-            "Mapeamento confirmado, mas a planilha não está nos locais conhecidos "
-            "data/historical/ ou data/reference/. Nenhum outro local será procurado."
-        )
-    elif mapping_confirmed and workbook_path is not None:
-        try:
-            loaded = load_expense_rules(
-                workbook_path.read_bytes(),
-                confirm_column_mapping=True,
-            )
-            historical_rules = loaded.rules
-            st.caption(f"Regras locais carregadas para esta sessão: {loaded.rule_count}.")
-            if loaded.skipped_without_description:
-                st.caption(
-                    f"{loaded.skipped_without_description} linha(s) sem descrição foram ignoradas."
-                )
-        except HistoricalRuleError as error:
-            st.error(f"Planilha não carregada ({error.code}): {error.message}")
+    historical_rules = _review_rules()
+    categories = st.session_state.get("review_categories", set())
+    _category_management(categories, demo=False)
     response = _api_get(
         "/transactions",
         **({} if only_uncategorized else {"movement_type": "pending"}),
@@ -809,7 +786,7 @@ def _render_real_review() -> None:
             st.write(f"Pessoa: {_person_label(row['person'])}")
             movement_label = st.selectbox(
                 "Natureza confirmada",
-                ("Despesa", "Entrada", "Transferência"),
+                ("Despesa",) if only_uncategorized else ("Despesa", "Entrada", "Transferência"),
                 key=f"movement-{row['source_key']}-{row['transaction_id']}",
             )
             movement_type = {
@@ -817,27 +794,29 @@ def _render_real_review() -> None:
                 "Entrada": "income",
                 "Transferência": "transfer",
             }[movement_label]
-            suggested = (
-                _get_category_suggestion(row, historical_rules)
-                if movement_type == "expense" and historical_rules is not None
-                else None
-            )
+            result = suggest_description(row["description"], historical_rules)
+            suggested = result.suggested_category if movement_type == "expense" else None
+            if movement_type == "expense" and result.status is CategorizationStatus.AMBIGUOUS:
+                st.warning(
+                    "Históricos discordam sobre esta descrição; escolha a categoria manualmente."
+                )
             if suggested:
                 st.info(
-                    "Sugestão exata: "
-                    f"{suggested['macro']} / {suggested['micro']}. Confira antes de salvar."
+                    f"Sugestão: {_suggestion_label(row['description'], historical_rules)}. "
+                    "Confira antes de salvar."
                 )
+                macro_key = f"macro-{row['source_key']}-{row['transaction_id']}"
+                micro_key = f"micro-{row['source_key']}-{row['transaction_id']}"
+                if st.button(
+                    "Usar sugestão",
+                    key=f"use-suggestion-{row['source_key']}-{row['transaction_id']}",
+                ):
+                    st.session_state[macro_key] = suggested.macro
+                    st.session_state[micro_key] = suggested.micro
             macro = micro = None
             if movement_type == "expense":
-                macro = st.text_input(
-                    "Macro categoria",
-                    value=suggested["macro"] if suggested else "",
-                    key=f"macro-{row['source_key']}-{row['transaction_id']}",
-                )
-                micro = st.text_input(
-                    "Micro categoria",
-                    value=suggested["micro"] if suggested else "",
-                    key=f"micro-{row['source_key']}-{row['transaction_id']}",
+                macro, micro = _category_selectors(
+                    categories, f"{row['source_key']}-{row['transaction_id']}"
                 )
             if st.button(
                 "Confirmar natureza e categoria",
@@ -846,43 +825,162 @@ def _render_real_review() -> None:
                 if movement_type == "expense" and (not macro or not micro):
                     st.warning("Informe macro e micro categoria para confirmar um gasto.")
                     return
-                response = _api_post(
-                    f"/transactions/{row['source_key']}/{row['transaction_id']}/movement-type",
-                    json={
-                        "movement_type": movement_type,
-                        "confirmed": True,
-                        "macro": macro,
-                        "micro": micro,
-                    },
-                )
+                path = f"/transactions/{row['source_key']}/{row['transaction_id']}"
+                if only_uncategorized:
+                    response = _api_post(
+                        f"{path}/category", json={"confirmed": True, "macro": macro, "micro": micro}
+                    )
+                else:
+                    response = _api_post(
+                        f"{path}/movement-type",
+                        json={
+                            "movement_type": movement_type,
+                            "confirmed": True,
+                            "macro": macro,
+                            "micro": micro,
+                        },
+                    )
                 _show_action_result(response, "Natureza salva.")
+
+
+def _review_rules() -> list[CategorizationRule]:
+    response = _api_get("/transactions", movement_type="expense")
+    rules = []
+    if response is None or response.status_code != 200:
+        st.warning("Histórico da aplicação indisponível; sugestões desativadas.")
+        return []
+    else:
+        rules = [
+            CategorizationRule("app-history", row["description"], Category(**row["category"]))
+            for row in response.json()["transactions"]
+            if row["category"] is not None
+        ]
+    catalog_response = _api_get("/categories")
+    categories = {
+        Category(**row["category"]) for row in response.json()["transactions"] if row["category"]
+    }
+    if catalog_response is not None and catalog_response.status_code == 200:
+        categories.update(Category(**row) for row in catalog_response.json()["categories"])
+    st.session_state["review_categories"] = categories
+    mapping_confirmed = st.checkbox(
+        "Confirmo o mapeamento provisório: Tipo de Fluxo = macro, Fluxo = micro, "
+        "Classificação = natureza; Observação contém a descrição para regra exata.",
+        key="confirm_category_mapping",
+    )
+    workbook_path = _historical_workbook_path()
+    if mapping_confirmed and workbook_path is None:
+        st.warning(
+            "Mapeamento confirmado, mas a planilha não está nos locais conhecidos "
+            "data/historical/ ou data/reference/. Nenhum outro local será procurado."
+        )
+        return []
+    elif mapping_confirmed and workbook_path is not None:
+        try:
+            loaded = load_expense_rules(
+                workbook_path.read_bytes(),
+                confirm_column_mapping=True,
+            )
+            categories.update(loaded.categories)
+            excluded = set(loaded.excluded_descriptions)
+            rules = [
+                rule
+                for rule in rules
+                if " ".join(rule.description.casefold().split()) not in excluded
+            ]
+            rules.extend(loaded.rules)
+            st.caption(f"Regras locais carregadas para esta sessão: {loaded.rule_count}.")
+            if excluded:
+                st.warning(
+                    f"{len(excluded)} descrição(ões) com categoria incompleta ou conflitante "
+                    "ficaram sem sugestão e precisam de revisão manual."
+                )
+                with st.expander("Linhas da planilha para revisar"):
+                    st.dataframe(
+                        [
+                            {"Aba": "Entrada", "Linha": row, "Motivo": reason}
+                            for row, reason in loaded.issue_rows
+                        ],
+                        hide_index=True,
+                    )
+            if loaded.skipped_without_description:
+                st.caption(
+                    f"{loaded.skipped_without_description} linha(s) sem descrição foram ignoradas."
+                )
+        except HistoricalRuleError as error:
+            st.error(f"Planilha não carregada ({error.code}): {error.message}")
+            return []
+    return rules
+
+
+def _category_selectors(categories: set[Category], key: str) -> tuple[str | None, str | None]:
+    macros = sorted({category.macro for category in categories})
+    macro = st.selectbox(
+        "Macro categoria", macros, index=None, placeholder="Selecione", key=f"macro-{key}"
+    )
+    micros = sorted({category.micro for category in categories if category.macro == macro})
+    micro = st.selectbox(
+        "Micro categoria", micros, index=None, placeholder="Selecione", key=f"micro-{key}"
+    )
+    return macro, micro
+
+
+def _category_management(categories: set[Category], *, demo: bool) -> None:
+    with st.expander("Cadastrar categoria"):
+        macro = st.text_input("Nova macrocategoria", key="new-category-macro")
+        micro = st.text_input("Nova microcategoria", key="new-category-micro")
+
+        def normalize(value):
+            return " ".join(value.split()).casefold()
+
+        macro, micro = " ".join(macro.split()), " ".join(micro.split())
+        exact = any(
+            normalize(c.macro) == normalize(macro) and normalize(c.micro) == normalize(micro)
+            for c in categories
+        )
+        names = sorted({c.macro for c in categories} | {c.micro for c in categories})
+        similar = (
+            sorted(
+                set(
+                    get_close_matches(macro, names, cutoff=0.8)
+                    + get_close_matches(micro, names, cutoff=0.8)
+                )
+            )
+            if macro and micro
+            else []
+        )
+        if exact:
+            st.warning("Essa categoria já existe.")
+        if similar and not exact:
+            st.warning("Nomes parecidos já existentes: " + ", ".join(similar))
+        confirmed = st.checkbox("Confirmo o cadastro da categoria", key="new-category-confirm")
+        if st.button("Cadastrar", disabled=not macro or not micro or exact or not confirmed):
+            if demo:
+                st.session_state.setdefault("demo_categories", []).append(Category(macro, micro))
+                st.rerun()
+            else:
+                response = _api_post(
+                    "/categories", json={"macro": macro, "micro": micro, "confirmed": True}
+                )
+                _show_action_result(response, "Categoria cadastrada.")
 
 
 def _historical_workbook_path() -> Path | None:
     return next((path.resolve() for path in HISTORICAL_WORKBOOK_CANDIDATES if path.is_file()), None)
 
 
-def _get_category_suggestion(row: dict, rules) -> dict[str, str] | None:
-    if not rules:
-        return None
-    suggestion = _api_post(
-        f"/transactions/{row['source_key']}/{row['transaction_id']}/category-suggestion",
-        json={
-            "rules": [
-                {
-                    "rule_id": rule.rule_id,
-                    "description": rule.description,
-                    "macro": rule.category.macro,
-                    "micro": rule.category.micro,
-                }
-                for rule in rules
-            ]
-        },
-    )
-    if suggestion is None or suggestion.status_code != 200:
-        return None
-    payload = suggestion.json()
-    return payload["suggested_category"] if payload["status"] == "suggested" else None
+def _suggestion_label(description: str, rules: list[CategorizationRule]) -> str:
+    result = suggest_description(description, rules)
+    if result.status is CategorizationStatus.AMBIGUOUS:
+        return "Conflito — revisar"
+    if result.suggested_category is None:
+        return "Sem sugestão"
+    sources = []
+    if "app-history" in result.matched_rule_ids:
+        sources.append("aplicação")
+    if any(rule_id.startswith("history-") for rule_id in result.matched_rule_ids):
+        sources.append("planilha")
+    category = result.suggested_category
+    return f"{category.macro} / {category.micro} ({' e '.join(sources)})"
 
 
 def _show_action_result(response, success_message: str) -> None:

@@ -141,6 +141,8 @@ class HistoricalRulesPreviewResponse(BaseModel):
     rules: list[HistoricalRuleResponse]
     rule_count: int
     skipped_without_description: int
+    skipped_incomplete_categories: int
+    excluded_descriptions: list[str]
 
 
 class PaymentDecisionRequest(BaseModel):
@@ -338,7 +340,9 @@ def create_app(
     @app.middleware("http")
     async def protect_sensitive_responses(request: Request, call_next):
         response = await call_next(request)
-        if request.url.path.startswith(("/imports", "/transactions", "/payment-candidates")):
+        if request.url.path.startswith(
+            ("/imports", "/transactions", "/payment-candidates", "/categories")
+        ):
             response.headers["Cache-Control"] = "no-store"
             response.headers["X-Content-Type-Options"] = "nosniff"
         return response
@@ -528,6 +532,25 @@ def create_app(
             explanation=result.explanation,
         )
 
+    @app.get("/categories")
+    def list_categories(request: Request):
+        return {
+            "categories": [
+                _category_response(category)
+                for category in get_repository(request).list_categories()
+            ]
+        }
+
+    @app.post("/categories")
+    def add_category(request: Request, body: CategoryReviewRequest):
+        if not body.confirmed:
+            raise HTTPException(status_code=409, detail="Confirmação explícita é necessária")
+        try:
+            get_repository(request).add_category(Category(body.macro, body.micro))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"detail": "Categoria cadastrada"}
+
     @app.post(
         "/categories/historical-rules/preview",
         response_model=HistoricalRulesPreviewResponse,
@@ -559,6 +582,8 @@ def create_app(
             ],
             rule_count=loaded.rule_count,
             skipped_without_description=loaded.skipped_without_description,
+            skipped_incomplete_categories=loaded.skipped_incomplete_categories,
+            excluded_descriptions=list(loaded.excluded_descriptions),
         )
 
     @app.post(

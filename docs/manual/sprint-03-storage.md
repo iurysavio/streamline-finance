@@ -14,12 +14,13 @@ Este manual explica como confirmar uma prévia válida do adaptador Nubank, guar
 
 ## Confirmar uma importação
 
-Ainda não há interface Streamlit nem confirmação por HTTP. O fluxo de aplicação deve criar prévia, mostrá-la, receber confirmação explícita e só então chamar o repositório.
+A interface Streamlit e a API já oferecem prévia e confirmação. O exemplo abaixo é apenas para experimentar o repositório isoladamente e não usa o banco operacional.
 
 Exemplo abaixo usa **somente fixture sintética**:
 
 ```python
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from streamline_finance.domain import Person, SourceKind
 from streamline_finance.importers.nubank import preview_nubank_csv
@@ -36,13 +37,14 @@ if not preview.can_confirm:
     raise ValueError("Revise os erros da prévia")
 
 # Em uma interface, só executar este bloco após ação explícita de confirmação.
-with FinanceRepository("data/db/finance.sqlite3") as repository:
-    result = repository.confirm_import(
-        preview,
-        source_key="nubank-main",
-        content=content,
-    )
-    print(result)
+with TemporaryDirectory() as temporary:
+    with FinanceRepository(Path(temporary) / "db" / "finance.sqlite3") as repository:
+        result = repository.confirm_import(
+            preview,
+            source_key="nubank-main",
+            content=content,
+        )
+        print(result)
 ```
 
 Não imprima `preview.transactions`, `source_fields`, linhas CSV, IDs, nomes, descrições ou valores de arquivos reais em terminal/logs compartilhados.
@@ -58,7 +60,7 @@ Não imprima `preview.transactions`, `source_fields`, linhas CSV, IDs, nomes, de
 
 ## Revisar natureza do movimento
 
-Transações importadas entram como `pending`. A natureza não é derivada só de sinal ou descrição. Depois de revisar manualmente, a aplicação pode chamar `review_movement_type(..., confirm=True)`. Mudanças só são aceitas enquanto o movimento ainda estiver pendente; cada decisão é registrada. API/UI na Sprint 4 devem obter confirmação explícita do usuário.
+Transações importadas entram como `pending`. A natureza não é derivada só de sinal ou descrição. Depois de revisar manualmente, a API chama `review_movement_type(..., confirm=True)`. Mudanças só são aceitas enquanto o movimento ainda estiver pendente; cada decisão é registrada e exige confirmação explícita.
 
 ## Candidatos de pagamento de cartão
 
@@ -77,9 +79,7 @@ Para usar corretamente, o criador da prévia deve passar explicitamente `SourceK
 
 ## Backup e restauração
 
-Nesta sprint não há comando de backup automatizado. Feche os processos que usam o banco antes de copiar. Faça cópia conjunta do banco `data/db/` e dos CSVs `data/raw/`; sem originais, não é possível reprocessar nem auditar importações. Guarde o backup num destino privado escolhido por você, de preferência com criptografia. Não envie para CI, Git ou serviços externos.
-
-Para testar recuperação, copie dados para uma pasta temporária ignorada, nunca sobrescreva primeiro o banco ativo. Um procedimento automatizado/testado de backup será parte de sprint futura.
+Feche os processos que usam o banco e copie conjuntamente `data/db/` e `data/raw/`. O roteiro detalhado, inclusive restauração isolada e verificação de integridade, está no [manual de operação e recuperação](sprint-06-operation.md). Não sobrescreva o banco ativo durante um ensaio.
 
 ## Testes
 

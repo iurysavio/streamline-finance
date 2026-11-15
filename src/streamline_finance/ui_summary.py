@@ -152,12 +152,12 @@ def top_expenses(
     start: date,
     end: date,
     person: str | None = None,
-    limit: int = 10,
+    limit: int | None = 10,
 ) -> tuple[TopExpense, ...]:
     """Return largest purchases by individual value, not grouped merchant totals."""
     if start > end:
         raise ValueError("start date must be before end date")
-    if limit < 1 or limit > 100:
+    if limit is not None and (limit < 1 or limit > 100):
         raise ValueError("limit must be between 1 and 100")
     rows: list[TopExpense] = []
     for row in transactions:
@@ -186,6 +186,40 @@ def top_expenses(
             rows, key=lambda item: (-item.amount_minor_units, item.occurred_on, item.transaction_id)
         )[:limit]
     )
+
+
+def category_highlights(transactions, *, start: date, end: date):
+    """Return largest net category and largest absolute reduction, in integer cents."""
+    duration = (end - start).days + 1
+    previous_start = start - timedelta(days=duration)
+    previous_end = start - timedelta(days=1)
+    current: dict[tuple[str, str], int] = defaultdict(int)
+    previous: dict[tuple[str, str], int] = defaultdict(int)
+    for row in transactions:
+        if row.movement_type.value != "expense" or row.category is None:
+            continue
+        target = (
+            current
+            if start <= row.occurred_on <= end
+            else previous
+            if previous_start <= row.occurred_on <= previous_end
+            else None
+        )
+        if target is not None:
+            amount = (
+                row.amount_minor_units
+                if isinstance(row, StoredTransaction)
+                else row.amount.minor_units
+            )
+            target[(row.category.macro, row.category.micro)] -= amount
+    largest = max(sorted(current), key=current.get) if current else None
+    reductions = {
+        key: previous.get(key, 0) - current.get(key, 0) for key in current.keys() | previous.keys()
+    }
+    best = max(sorted(reductions), key=reductions.get) if reductions else None
+    if best is not None and reductions[best] <= 0:
+        best = None
+    return (largest, current.get(largest, 0), best, previous.get(best, 0), current.get(best, 0))
 
 
 def compare_spending_periods(

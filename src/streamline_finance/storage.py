@@ -309,6 +309,35 @@ class FinanceRepository:
         ).fetchall()
         return tuple(_stored_transaction(row) for row in rows)
 
+    @_serialized
+    def list_categories(self) -> tuple[Category, ...]:
+        rows = self._connection.execute(
+            "SELECT macro, micro FROM categories UNION "
+            "SELECT category_macro, category_micro FROM transactions "
+            "WHERE category_macro IS NOT NULL AND category_micro IS NOT NULL"
+        ).fetchall()
+        return tuple(Category(row[0], row[1]) for row in rows)
+
+    @_serialized
+    def add_category(self, category: Category) -> None:
+        macro = " ".join(category.macro.split())
+        micro = " ".join(category.micro.split())
+        key = (macro.casefold(), micro.casefold())
+        existing = self.list_categories()
+        if any(
+            (" ".join(c.macro.split()).casefold(), " ".join(c.micro.split()).casefold()) == key
+            for c in existing
+        ):
+            raise ValueError("Categoria já cadastrada")
+        if any(
+            " ".join(c.macro.split()).casefold() == key[0] and c.macro != macro for c in existing
+        ):
+            raise ValueError("Use a grafia da macrocategoria existente")
+        with self._connection:
+            self._connection.execute(
+                "INSERT INTO categories (macro, micro) VALUES (?, ?)", (macro, micro)
+            )
+
     def insert_demo_transactions(self, transactions: Iterable[Transaction]) -> None:
         """Write generated demo rows only; prevents demo rows from mixing with personal data."""
         rows = tuple(transactions)
@@ -683,6 +712,12 @@ class FinanceRepository:
                     previous_value TEXT NOT NULL,
                     new_value TEXT NOT NULL,
                     reviewed_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS categories (
+                    macro TEXT NOT NULL,
+                    micro TEXT NOT NULL,
+                    PRIMARY KEY (macro, micro)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_transactions_occurred_on

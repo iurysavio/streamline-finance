@@ -16,7 +16,7 @@ def test_streamlit_dashboard_renders_empty_state_without_starting_network_calls(
 
 
 def test_demo_analysis_has_synthetic_interactive_trend_chart(monkeypatch) -> None:
-    import altair as alt
+    import plotly.graph_objects as go
 
     import streamline_finance.ui_pages as ui_pages
 
@@ -25,14 +25,14 @@ def test_demo_analysis_has_synthetic_interactive_trend_chart(monkeypatch) -> Non
     def capture_chart(chart, **kwargs):
         charts.append(chart)
 
-    monkeypatch.setattr(ui_pages.st, "altair_chart", capture_chart)
+    monkeypatch.setattr(ui_pages.st, "plotly_chart", capture_chart)
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=10).run()
 
     assert not app.exception
     assert len(charts) == 2
-    assert isinstance(charts[0], (alt.Chart, alt.LayerChart))
+    assert isinstance(charts[0], go.Figure)
     spec = charts[0].to_dict()
-    assert "params" in spec
+    assert "%{customdata}" in spec["data"][0]["hovertemplate"]
 
 
 def test_import_page_has_synthetic_flow_and_explicit_confirmation_control() -> None:
@@ -178,13 +178,147 @@ def test_review_page_shows_pending_transactions_and_manual_category_confirmation
             app.radio(key="data_mode_label").set_value("Meus dados locais").run()
             app.switch_page("pages/3_Revisar.py").run()
             assert not app.exception
-            assert len(app.expander) == 2
-            assert any(item.label == "Macro categoria" for item in app.text_input)
+            assert len(app.expander) == 3
+            assert any(item.label == "Macro categoria" for item in app.selectbox)
             assert any(button.label == "Confirmar natureza e categoria" for button in app.button)
     finally:
         client.close()
         repository.close()
         sandbox.cleanup()
+
+
+def test_confirmed_history_suggests_for_new_pending_import_without_classifying(
+    tmp_path, monkeypatch
+):
+    import httpx2
+    from fastapi.testclient import TestClient
+
+    from streamline_finance.api import create_app
+    from streamline_finance.domain import Category, MovementType, Person
+    from streamline_finance.importers.nubank import preview_nubank_csv
+    from streamline_finance.storage import FinanceRepository
+
+    database = tmp_path / "data" / "db" / "finance.sqlite3"
+    first = (ROOT / "tests" / "fixtures" / "nubank_statement_synthetic.csv").read_bytes()
+    second = first.replace(b"synthetic-transaction-001", b"synthetic-new-001").replace(
+        b"synthetic-transaction-002", b"synthetic-new-002"
+    )
+    with FinanceRepository(database) as repository:
+        repository.confirm_import(
+            preview_nubank_csv(first, person=Person.SELF, source_key="test"),
+            source_key="test",
+            content=first,
+        )
+        repository.review_movement_type(
+            "test",
+            "synthetic-transaction-001",
+            MovementType.EXPENSE,
+            confirm=True,
+            category=Category("Casa", "Mercado"),
+        )
+        repository.confirm_import(
+            preview_nubank_csv(second, person=Person.SELF, source_key="test"),
+            source_key="test",
+            content=second,
+        )
+
+    with (
+        FinanceRepository(database) as repository,
+        TestClient(create_app(repository=repository)) as client,
+    ):
+        monkeypatch.setattr(
+            httpx2,
+            "get",
+            lambda url, **kwargs: client.get(
+                url.removeprefix("http://127.0.0.1:8000"), params=kwargs.get("params")
+            ),
+        )
+        monkeypatch.setattr(
+            httpx2,
+            "post",
+            lambda url, **kwargs: client.post(
+                url.removeprefix("http://127.0.0.1:8000"), json=kwargs.get("json")
+            ),
+        )
+        app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=10).run()
+        app.radio(key="data_mode_label").set_value("Meus dados locais").run()
+        app.switch_page("pages/2_Importar.py").run()
+        app.text_input[0].set_value("test").run()
+        payload = client.post(
+            "/imports/preview",
+            data={"source_key": "test", "person": "self"},
+            files={"file": ("synthetic.csv", second, "text/csv")},
+        ).json()
+        app.session_state["import_preview"] = {
+            "content": second,
+            "filename": "synthetic.csv",
+            "source_key": "test",
+            "person": "self",
+            "source_kind": "bank_account",
+            "response": payload,
+        }
+        app.run()
+        assert (
+            "Casa / Mercado (aplicação)"
+            in app.dataframe[0].value["Categoria sugerida (se despesa)"].values
+        )
+        app.switch_page("pages/3_Revisar.py").run()
+        assert not app.exception
+        assert any("Casa / Mercado (aplicação)" in info.value for info in app.info)
+        assert (
+            repository.get_transaction("synthetic-new-001", source_key="test").movement_type
+            is MovementType.PENDING
+        )
+        app.button(key="use-suggestion-test-synthetic-new-001").click().run()
+        assert app.selectbox(key="macro-test-synthetic-new-001").value == "Casa"
+        assert app.selectbox(key="micro-test-synthetic-new-001").value == "Mercado"
+        assert (
+            repository.get_transaction("synthetic-new-001", source_key="test").movement_type
+            is MovementType.PENDING
+        )
+        app.button(key="confirm-type-test-synthetic-new-001").click().run()
+        assert repository.get_transaction(
+            "synthetic-new-001", source_key="test"
+        ).category == Category("Casa", "Mercado")
+
+
+def test_preview_suggestion_labels_explain_sources_and_conflicts():
+    from streamline_finance.categorization import CategorizationRule
+    from streamline_finance.domain import Category
+    from streamline_finance.ui_pages import _suggestion_label
+
+    rules = [
+        CategorizationRule("app-history", "Loja fictícia", Category("Casa", "Mercado")),
+        CategorizationRule("history-1", "LOJA FICTÍCIA", Category("Casa", "Mercado")),
+    ]
+    assert _suggestion_label("loja   fictícia", rules) == "Casa / Mercado (aplicação e planilha)"
+    rules.append(CategorizationRule("history-2", "loja fictícia", Category("Lazer", "Comida")))
+    assert _suggestion_label("loja fictícia", rules) == "Conflito — revisar"
+    assert _suggestion_label("outra loja", rules) == "Sem sugestão"
+
+
+def test_expense_description_splits_only_first_delimiter():
+    from streamline_finance.ui_pages import _split_description
+
+    assert _split_description("PIX - Loja Exemplo - Filial") == ("PIX", "Loja Exemplo - Filial")
+    assert _split_description("Loja Exemplo") == ("Não informado", "Loja Exemplo")
+
+
+def test_trend_hover_uses_exact_brl_label():
+    from streamline_finance.ui_pages import _trend_chart
+    from streamline_finance.ui_summary import SpendingTrendPoint
+
+    chart = _trend_chart((SpendingTrendPoint("2026-01", "Todos", 123456),), "month", "total")
+    assert list(chart.data[0].customdata) == ["R$ 1.234,56"]
+    assert "%{customdata}" in chart.data[0].hovertemplate
+
+
+def test_expense_filters_apply_to_all_period_rows():
+    app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=10).run()
+    assert len(app.dataframe[0].value) > 10
+    app.multiselect(key="expense-filter-Macro").select("Lazer").run()
+    assert not app.exception
+    assert set(app.dataframe[0].value["Macro"]) == {"Lazer"}
 
 
 def test_demo_csv_upload_stays_in_session_memory_and_never_enters_sqlite() -> None:
@@ -238,37 +372,37 @@ def test_demo_csv_upload_stays_in_session_memory_and_never_enters_sqlite() -> No
         sandbox.cleanup()
 
 
-def test_analysis_renders_altair_chart_with_temporal_brush(monkeypatch) -> None:
-    import altair as alt
+def test_analysis_renders_plotly_trend_with_formatted_values(monkeypatch) -> None:
+    import plotly.graph_objects as go
 
     import streamline_finance.ui_pages as ui_pages
 
     charts = []
-    monkeypatch.setattr(ui_pages.st, "altair_chart", lambda chart, **kwargs: charts.append(chart))
+    monkeypatch.setattr(ui_pages.st, "plotly_chart", lambda chart, **kwargs: charts.append(chart))
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=10).run()
 
     assert not app.exception
     assert len(charts) == 2
-    assert isinstance(charts[0], alt.TopLevelMixin)
+    assert isinstance(charts[0], go.Figure)
     specification = charts[0].to_dict()
-    assert specification["params"][0]["select"]["type"] == "interval"
+    assert all(value.startswith("R$ ") for value in specification["data"][0]["customdata"])
 
 
 def test_analysis_renders_only_trend_and_comparison_charts_top_expenses_is_table(
     monkeypatch,
 ) -> None:
-    import altair as alt
+    import plotly.graph_objects as go
 
     import streamline_finance.ui_pages as ui_pages
 
     charts = []
-    monkeypatch.setattr(ui_pages.st, "altair_chart", lambda chart, **kwargs: charts.append(chart))
+    monkeypatch.setattr(ui_pages.st, "plotly_chart", lambda chart, **kwargs: charts.append(chart))
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=10).run()
 
     assert not app.exception
     assert len(charts) == 2
-    assert all(isinstance(chart, alt.TopLevelMixin) for chart in charts)
-    chart_titles = [chart.to_dict().get("title", "") for chart in charts]
+    assert all(isinstance(chart, go.Figure) for chart in charts)
+    chart_titles = [chart.layout.title.text or "" for chart in charts]
     assert "Gasto líquido entre períodos iguais" in chart_titles
     assert not any("Top 10" in title for title in chart_titles)
     assert len(app.dataframe) >= 1
@@ -285,22 +419,15 @@ def test_period_comparison_chart_has_visible_bar_value_labels() -> None:
     )
     spec = chart.to_dict()
 
-    assert "layer" in spec
-    text_layer = next(
-        layer for layer in spec["layer"] if layer.get("mark", {}).get("type") == "text"
-    )
-    bar_layer = next(layer for layer in spec["layer"] if layer.get("mark", {}).get("type") == "bar")
-    assert text_layer["mark"]["color"] == "#F8FAFC"
-    assert text_layer["encoding"]["text"]["field"] == "Rótulo"
-    assert bar_layer["mark"]["color"] == "#4F8BF9"
-    assert bar_layer["encoding"]["y"]["scale"]["domainMin"] == 0
-    assert "params" not in spec
+    assert spec["data"][0]["text"] == ["R$ 0,00", "R$ 0,00"]
+    assert spec["data"][0]["marker"]["color"] == "#4F8BF9"
+    assert spec["layout"]["yaxis"]["rangemode"] == "tozero"
 
 
 def test_comparison_cards_are_rendered_before_comparison_chart(monkeypatch) -> None:
     import streamline_finance.ui_pages as ui_pages
 
-    monkeypatch.setattr(ui_pages.st, "altair_chart", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ui_pages.st, "plotly_chart", lambda *args, **kwargs: None)
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=10).run()
     comparison_header_index = next(
         index
@@ -347,13 +474,18 @@ def test_variation_card_uses_green_down_arrow_for_decrease_and_red_up_arrow_for_
         def markdown(self, *args, **kwargs):
             captured.append((args, kwargs))
 
+        def caption(self, *args, **kwargs):
+            pass
+
     columns_call = 0
     metric_cards = []
 
-    def columns(_):
+    def columns(spec):
         nonlocal columns_call
         columns_call += 1
-        if columns_call % 3 in {1, 2}:
+        if spec == 4:
+            return tuple(MetricCapture() for _ in range(4))
+        if spec != 3:
             cards = (MetricCapture(), MetricCapture())
         else:
             cards = (MetricCapture(), MetricCapture(), MetricCapture())
@@ -361,7 +493,8 @@ def test_variation_card_uses_green_down_arrow_for_decrease_and_red_up_arrow_for_
         return cards
 
     monkeypatch.setattr(ui_pages.st, "columns", columns)
-    monkeypatch.setattr(ui_pages.st, "altair_chart", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ui_pages.st, "plotly_chart", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ui_pages, "_expense_table", lambda *args: None)
     monkeypatch.setattr(ui_pages.st, "subheader", lambda *args, **kwargs: None)
     monkeypatch.setattr(ui_pages.st, "metric", lambda *args, **kwargs: None)
     monkeypatch.setattr(ui_pages.st, "caption", lambda *args, **kwargs: None)
@@ -479,12 +612,12 @@ def test_uncategorized_expense_helper_obeys_date_and_person_filters():
 def test_analysis_renders_top_period_comparison_and_category_review_button_in_demo(
     monkeypatch,
 ) -> None:
-    import altair as alt
+    import plotly.graph_objects as go
 
     import streamline_finance.ui_pages as ui_pages
 
     charts = []
-    monkeypatch.setattr(ui_pages.st, "altair_chart", lambda chart, **kwargs: charts.append(chart))
+    monkeypatch.setattr(ui_pages.st, "plotly_chart", lambda chart, **kwargs: charts.append(chart))
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=10).run()
 
     assert not app.exception
@@ -493,11 +626,9 @@ def test_analysis_renders_top_period_comparison_and_category_review_button_in_de
         select.label == "Detalhar por" and select.value == "Total" for select in app.selectbox
     )
     assert len(app.dataframe) >= 1
-    assert any(
-        chart.to_dict().get("title") == "Gasto líquido entre períodos iguais" for chart in charts
-    )
+    assert any(chart.layout.title.text == "Gasto líquido entre períodos iguais" for chart in charts)
     assert any(button.label == "Revisar transações sem categoria" for button in app.button)
-    assert all(isinstance(chart, alt.TopLevelMixin) for chart in charts)
+    assert all(isinstance(chart, go.Figure) for chart in charts)
     assert any(button.label == "Revisar transações sem categoria" for button in app.button)
 
 

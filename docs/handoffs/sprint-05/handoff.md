@@ -2,7 +2,7 @@
 
 ## Status
 
-**Concluída, aguardando aceite do usuário.** As revisões de design solicitadas foram implementadas. Sprint 6 requer aceite explícito da Sprint 5.
+**Concluída e aceita explicitamente pelo usuário.** O usuário aprovou a Sprint 5 e autorizou o início da Sprint 6 em 15/11/2026.
 
 ## Escopo desta implementação
 
@@ -13,6 +13,8 @@ Design refinado pelo usuário: navegação nativa multipágina; Demo inicial com
 Pedido adicional aprovado: abaixo da tendência, gráfico/lista de top 10 despesas individuais no mesmo intervalo e gráfico de comparação com intervalo anterior de mesmo número de dias; variação percentual. Despesas sem categoria (macro/micro ausente) exibem botão para ir diretamente à revisão; botão oculto quando count=0.
 
 ## TDD e implementação
+
+Os itens abaixo registram o estado e as verificações históricas da implementação inicial; ajustes posteriores, incluindo a troca de Altair por Plotly, estão em “Ajuste solicitado durante aceite”. Contagens de testes e estado do banco abaixo são históricos, não uma descrição do banco atual.
 
 - Testes sintéticos para estado vazio, filtro pessoa/mês, estados de API indisponível, upload inválido e confirmação condicionada a prévia válida.
 - Preview sintética da planilha exige confirmação do mapeamento, gera regras somente em memória e nunca importa o arquivo direto para a base.
@@ -91,4 +93,14 @@ Não abrir arquivos reais para desenvolver/testar UI. Verificar que banco local 
 
 ## Próximo passo
 
-Iniciar API e Streamlit conforme o manual, conferir em Demo e então aceitar ou pedir ajustes. Aguardar aceite explícito da Sprint 5 antes de iniciar Sprint 6.
+Prosseguir com a Sprint 6 autorizada; consultar `docs/handoffs/sprint-06/handoff.md` para o estado atual.
+
+## Ajuste solicitado durante aceite
+
+- Painel usa Plotly, tooltip BRL, cards de microcategoria/economia/maior saída e tabela de despesas do período com filtros. Pivot foi adiada pelo usuário.
+- Revisão usa seletores de categorias dependentes e cadastro separado. Catálogo SQLite é aditivo e Demo mantém catálogo somente em memória; pares da planilha autorizada e revisões prévias aparecem nas opções.
+- Diagnóstico local mostra aba, linha e motivo de categorias incompletas ou conflitantes na planilha, sem editar a planilha.
+- Busca da planilha inclui `data/historical/ControleFinanceiro_VR.xlsx` antes dos caminhos anteriores, sem mover arquivos.
+- Categorias incompletas e conflitos na planilha não impedem o carregamento das demais regras. As descrições afetadas não geram sugestões, inclusive a partir do histórico do app, enquanto o mapeamento da planilha estiver ativo.
+- Prévia e revisão sugerem categorias por descrição exata normalizada a partir das despesas confirmadas no banco e, após confirmação do mapeamento, das regras da planilha. Origens são exibidas; conflitos exigem revisão manual. Sugestões não classificam nem gravam automaticamente.
+- A revisão aceita usar uma sugestão em movimento pendente antes de confirmar sua natureza. Importações continuam pendentes até revisão humana.

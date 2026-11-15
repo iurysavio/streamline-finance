@@ -6,7 +6,7 @@ Leia os planos incrementais em [`docs/plans/`](docs/plans/README.md). Nenhuma sp
 
 O roteiro e o estado de continuidade da Sprint 0 ficam em [`docs/handoffs/sprint-00/handoff.md`](docs/handoffs/sprint-00/handoff.md).
 
-Para preparar o ambiente local, siga o [manual de setup](docs/manual/sprint-00-setup.md) e execute `uv sync` na raiz. Isso instala o pacote `src/` no ambiente virtual para que imports do projeto funcionem em comandos `uv run`. A aplicação Streamlit ainda não foi iniciada; os comandos atuais validam a fundação, domínio, prévia sintética, formatação e lint.
+Para preparar e operar a aplicação local, siga o [manual de operação e recuperação](docs/manual/sprint-06-operation.md). `uv sync --locked` instala o pacote `src/` no ambiente virtual; FastAPI e Streamlit são executados localmente.
 
 O domínio financeiro e as regras de categoria em andamento estão descritos no [manual da Sprint 1](docs/manual/sprint-01-domain.md), com continuidade em [`docs/handoffs/sprint-01/handoff.md`](docs/handoffs/sprint-01/handoff.md).
 
@@ -17,6 +17,8 @@ Para persistência local, importações idempotentes e revisão de possíveis pa
 A API local está descrita no [manual da Sprint 4](docs/manual/sprint-04-api.md), com continuidade em [`docs/handoffs/sprint-04/handoff.md`](docs/handoffs/sprint-04/handoff.md).
 
 A interface Streamlit e o painel de despesas são documentados no [manual da Sprint 5](docs/manual/sprint-05-streamlit.md), com continuidade em [`docs/handoffs/sprint-05/handoff.md`](docs/handoffs/sprint-05/handoff.md).
+
+O roteiro de aceite e recuperação do v0 está no [handoff da Sprint 6](docs/handoffs/sprint-06/handoff.md).
 
 ## Configuração do OpenCode
 

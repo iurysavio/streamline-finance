@@ -52,6 +52,22 @@ def test_preview_endpoint_does_not_write_to_database_or_raw_directory(tmp_path) 
     assert list(repository.raw_directory.iterdir()) == []
 
 
+def test_category_catalog_requires_confirmation_and_rejects_normalized_duplicates(tmp_path):
+    client, repository = client_for(tmp_path)
+    data = {"macro": "Casa", "micro": "Mercado", "confirmed": False}
+    assert client.post("/categories", json=data).status_code == 409
+    assert repository.list_categories() == ()
+    assert client.post("/categories", json={**data, "confirmed": True}).status_code == 200
+    assert (
+        client.post(
+            "/categories", json={"macro": " casa ", "micro": "MERCADO", "confirmed": True}
+        ).status_code
+        == 409
+    )
+    assert client.get("/categories").json()["categories"] == [{"macro": "Casa", "micro": "Mercado"}]
+    assert client.get("/categories").headers["cache-control"] == "no-store"
+
+
 def test_invalid_preview_returns_safe_errors_and_confirmation_is_rejected(tmp_path) -> None:
     client, repository = client_for(tmp_path)
     preview_response = client.post(

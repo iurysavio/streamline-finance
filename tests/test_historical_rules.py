@@ -68,18 +68,74 @@ def test_conflicting_description_categories_are_reported_not_arbitrarily_selecte
         ]
     )
 
-    try:
-        load_expense_rules(workbook_bytes, confirm_column_mapping=True)
-    except HistoricalRuleError as error:
-        assert error.code == "ambiguous_description"
-    else:
-        raise AssertionError("conflicting historical categories must not choose arbitrary rule")
+    result = load_expense_rules(workbook_bytes, confirm_column_mapping=True)
+    assert result.rules == ()
+    assert result.excluded_descriptions == ("loja fictícia",)
+
+
+def test_incomplete_or_conflicting_descriptions_do_not_hide_valid_rules():
+    workbook_bytes = synthetic_workbook(
+        [
+            ["Data", "Valor", "Fluxo", "Tipo de Fluxo", "Classificação", "Observação"],
+            [None, None, "Mercado", "Casa", "Despesa", "Incompleta"],
+            [None, None, None, "Casa", "Despesa", "INCOMPLETA"],
+            [None, None, "Mercado", "Casa", "Despesa", "Incompleta"],
+            [None, None, "Mercado", "Casa", "Despesa", "Válida"],
+        ]
+    )
+    result = load_expense_rules(workbook_bytes, confirm_column_mapping=True)
+    assert [rule.description for rule in result.rules] == ["Válida"]
+    assert result.excluded_descriptions == ("incompleta",)
+    assert result.skipped_incomplete_categories == 1
+    assert result.issue_rows == (
+        (3, "Categoria incompleta"),
+        (4, "Categoria incompleta"),
+        (5, "Categoria incompleta"),
+    )
+
+
+def test_incomplete_workbook_description_blocks_matching_app_history(tmp_path, monkeypatch):
+    import streamline_finance.ui_pages as ui
+
+    workbook = tmp_path / "synthetic.xlsx"
+    workbook.write_bytes(
+        synthetic_workbook(
+            [
+                ["Data", "Valor", "Fluxo", "Tipo de Fluxo", "Classificação", "Observação"],
+                [None, None, None, "Casa", "Despesa", "Loja fictícia"],
+            ]
+        )
+    )
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {
+                "transactions": [
+                    {
+                        "description": "LOJA FICTÍCIA",
+                        "category": {"macro": "Casa", "micro": "Mercado"},
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(
+        ui, "_api_get", lambda path, **kwargs: Response() if path == "/transactions" else None
+    )
+    monkeypatch.setattr(ui, "_historical_workbook_path", lambda: workbook)
+    monkeypatch.setattr(ui.st, "checkbox", lambda *args, **kwargs: True)
+    monkeypatch.setattr(ui.st, "caption", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ui.st, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ui.st, "dataframe", lambda *args, **kwargs: None)
+    assert ui._review_rules() == []
 
 
 def test_historical_workbook_searches_historic_then_reference_path_only(
     tmp_path, monkeypatch
 ) -> None:
     historic = tmp_path / "data" / "historical" / "ControleFinanceiro_VR-2.xlsx"
+    current = tmp_path / "data" / "historical" / "ControleFinanceiro_VR.xlsx"
     reference = tmp_path / "data" / "reference" / "ControleFinanceiro.xlsx"
     unrecognized = tmp_path / "data" / "other" / "private.xlsx"
     historic.parent.mkdir(parents=True)
@@ -91,6 +147,9 @@ def test_historical_workbook_searches_historic_then_reference_path_only(
 
     assert _historical_workbook_path() == historic
 
+    current.touch()
+    assert _historical_workbook_path() == current
+    current.unlink()
     historic.unlink()
     reference.touch()
     assert _historical_workbook_path() == reference

@@ -68,7 +68,15 @@ def suggest_category(
             explanation="Movement is not an expense; expense categorization was skipped.",
         )
 
-    normalized_description = _normalize_description(transaction.description)
+    return suggest_description(transaction.description, rules)
+
+
+def suggest_description(
+    description: str,
+    rules: list[CategorizationRule] | tuple[CategorizationRule, ...],
+) -> CategorizationResult:
+    """Suggest a category for a description without classifying the movement."""
+    normalized_description = _normalize_description(description)
     matches = tuple(
         rule for rule in rules if _normalize_description(rule.description) == normalized_description
     )

@@ -7,6 +7,7 @@ from streamline_finance.categorization import (
     CategorizationRule,
     CategorizationStatus,
     suggest_category,
+    suggest_description,
 )
 from streamline_finance.domain import (
     Category,
@@ -67,6 +68,18 @@ def test_exact_description_rule_suggests_category_case_and_spacing_insensitively
     assert result.suggested_category == category
     assert result.matched_rule_ids == ("rule-1",)
     assert "rule-1" in result.explanation
+
+
+def test_pending_description_suggestions_detect_conflicting_sources() -> None:
+    category = Category("Casa", "Mercado")
+    rules = [CategorizationRule("app-history", "Loja Exemplo", category)]
+    assert suggest_description(" LOJA   EXEMPLO ", rules).suggested_category == category
+    assert (
+        suggest_description("Loja Exemplo filial", rules).status
+        is CategorizationStatus.NEEDS_REVIEW
+    )
+    rules.append(CategorizationRule("history-1", "Loja Exemplo", Category("Lazer", "Comida")))
+    assert suggest_description("Loja Exemplo", rules).status is CategorizationStatus.AMBIGUOUS
 
 
 def test_unknown_description_requires_review_instead_of_guessing() -> None:

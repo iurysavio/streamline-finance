@@ -51,6 +51,7 @@ with st.sidebar:
     if previous_mode == "demo" and next_mode == "real":
         st.session_state.pop("demo_transactions", None)
         st.session_state.pop("demo_upload_preview", None)
+        st.session_state.pop("demo_categories", None)
     st.session_state["data_mode"] = "demo" if mode_label.startswith("Demo") else "real"
     if st.session_state["data_mode"] == "demo":
         st.caption("Sandbox temporário: alterações de demonstração não são salvas no banco.")

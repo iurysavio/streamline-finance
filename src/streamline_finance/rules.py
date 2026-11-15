@@ -16,6 +16,10 @@ from streamline_finance.domain import Category
 class HistoricalRules:
     rules: tuple[CategorizationRule, ...]
     skipped_without_description: int
+    skipped_incomplete_categories: int
+    excluded_descriptions: tuple[str, ...]
+    issue_rows: tuple[tuple[int, str], ...]
+    categories: tuple[Category, ...]
 
     @property
     def rule_count(self) -> int:
@@ -72,6 +76,11 @@ def load_expense_rules(
     column_indexes = {name: header_values.index(name) for name in required}
     rules: dict[str, CategorizationRule] = {}
     skipped = 0
+    incomplete = 0
+    excluded: set[str] = set()
+    row_numbers: dict[str, list[int]] = {}
+    reasons: dict[str, str] = {}
+    categories: set[Category] = set()
     try:
         for row_number, row in enumerate(
             sheet.iter_rows(min_row=header_row_index + 1, values_only=True),
@@ -84,23 +93,27 @@ def load_expense_rules(
             description = _cell_text(row, column_indexes["Observação"])
             macro = _cell_text(row, column_indexes["Tipo de Fluxo"])
             micro = _cell_text(row, column_indexes["Fluxo"])
+            if macro and micro:
+                categories.add(Category(macro, micro))
             if not description:
                 skipped += 1
                 continue
-            if not macro or not micro:
-                # Don't include the actual workbook contents in the exception.
-                raise HistoricalRuleError(
-                    "incomplete_category",
-                    f"An expense row near row {row_number} has an incomplete category pair.",
-                )
-
             key = _normalize_description(description)
+            row_numbers.setdefault(key, []).append(row_number)
+            if not macro or not micro:
+                incomplete += 1
+                excluded.add(key)
+                reasons[key] = "Categoria incompleta"
+                rules.pop(key, None)
+                continue
+            if key in excluded:
+                continue
             category = Category(macro=macro, micro=micro)
             if key in rules and rules[key].category != category:
-                raise HistoricalRuleError(
-                    "ambiguous_description",
-                    f"An expense description near row {row_number} maps to conflicting categories.",
-                )
+                excluded.add(key)
+                reasons[key] = "Categorias conflitantes"
+                rules.pop(key)
+                continue
             if key not in rules:
                 identifier = sha256(
                     f"{row_number}\0{description}\0{macro}\0{micro}".encode()
@@ -113,7 +126,15 @@ def load_expense_rules(
     finally:
         workbook.close()
 
-    return HistoricalRules(tuple(rules.values()), skipped)
+    issues = tuple(sorted((row, reasons[key]) for key in excluded for row in row_numbers[key]))
+    return HistoricalRules(
+        tuple(rules.values()),
+        skipped,
+        incomplete,
+        tuple(sorted(excluded)),
+        issues,
+        tuple(sorted(categories, key=lambda category: (category.macro, category.micro))),
+    )
 
 
 def _find_header_row(sheet) -> tuple[int, tuple[str, ...]]:
