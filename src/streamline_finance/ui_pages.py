@@ -142,12 +142,10 @@ def render_analysis_page() -> None:
         return
 
     today = date.today()
-    default_start = (
-        date(today.year, today.month, 1) if today.month > 1 else date(today.year, 1, 1)
-    )
+    default_start = date(today.year, today.month, 1) if today.month > 1 else date(today.year, 1, 1)
     date_col, person_col = st.columns([2, 1])
     selected_dates = date_col.date_input(
-        "Período",
+        "  Período",
         value=(default_start, today),
         key="analysis_date_range",
     )
@@ -389,6 +387,9 @@ def _expense_table(expenses, start: date, end: date) -> None:
     rows = _top_expense_rows(expenses)
     frame = pd.DataFrame(rows)
     frame["_centavos"] = [item.amount_minor_units for item in expenses]
+    if st.session_state.get("expense_date_bounds") != (start, end):
+        st.session_state.pop("expense_dates", None)
+        st.session_state["expense_date_bounds"] = (start, end)
     with st.expander("Filtrar despesas"):
         dates = st.date_input(
             "Data da despesa",
@@ -568,6 +569,30 @@ def _render_demo_import() -> None:
 
 def _render_real_import() -> None:
     st.caption("Faça uma prévia primeiro. Nada será salvo até você confirmar.")
+    format_label = st.selectbox(
+        "Formato do arquivo", ("Extrato Nubank", "Fatura C6", "Fatura Nubank")
+    )
+    import_format = {
+        "Extrato Nubank": "nubank_statement",
+        "Fatura C6": "c6_invoice",
+        "Fatura Nubank": "nubank_invoice",
+    }[format_label]
+    invoice_month = None
+    if import_format != "nubank_statement":
+        invoice_date = st.date_input(
+            "Competência da fatura (selecione qualquer dia do mês)",
+            value=date.today(),
+            key="invoice_month",
+        )
+        invoice_month = invoice_date.strftime("%Y-%m")
+        st.info(
+            "Confira a competência; parcelas originais são preservadas sem interpretação. "
+            "Todos os lançamentos exigem revisão."
+        )
+        st.warning(
+            "A conciliação com pagamento de fatura ainda não está implementada. "
+            "Se o pagamento no extrato foi confirmado como despesa, o gasto pode ficar duplicado."
+        )
     person_label = st.selectbox("Pessoa dona do extrato", tuple(_person_map()))
     source_key = st.text_input(
         "Identificação da conta/origem", placeholder="Ex.: nubank-conta-iury"
@@ -584,6 +609,9 @@ def _render_real_import() -> None:
         "Conta bancária": SourceKind.BANK_ACCOUNT.value,
         "Cartão de crédito": SourceKind.CREDIT_CARD.value,
     }[source_kind_label]
+    if import_format != "nubank_statement" and source_kind != SourceKind.CREDIT_CARD.value:
+        st.warning("Selecione Cartão de crédito como tipo da origem para importar uma fatura.")
+        return
 
     if st.button(
         "Gerar prévia",
@@ -595,7 +623,13 @@ def _render_real_import() -> None:
         content = uploaded.getvalue()
         response = _api_post(
             "/imports/preview",
-            data={"source_key": source_key.strip(), "person": person, "source_kind": source_kind},
+            data={
+                "source_key": source_key.strip(),
+                "person": person,
+                "source_kind": source_kind,
+                "import_format": import_format,
+                **({"invoice_month": invoice_month} if invoice_month else {}),
+            },
             files={"file": (uploaded.name, content, "text/csv")},
         )
         if response is None:
@@ -610,6 +644,8 @@ def _render_real_import() -> None:
             "source_key": source_key.strip(),
             "person": person,
             "source_kind": source_kind,
+            "import_format": import_format,
+            "invoice_month": invoice_month,
             "response": response.json(),
         }
 
@@ -620,6 +656,8 @@ def _render_real_import() -> None:
         preview["source_key"] != source_key.strip()
         or preview["person"] != person
         or preview["source_kind"] != source_kind
+        or preview.get("import_format", "nubank_statement") != import_format
+        or preview.get("invoice_month") != invoice_month
     ):
         st.warning("A prévia aberta usa escolhas diferentes. Gere outra prévia antes de confirmar.")
         return
@@ -656,7 +694,9 @@ def _render_preview_and_confirmation(preview: dict, rules: list[CategorizationRu
                 st.write(f"Linha {index}")
                 source_fields = row["source_fields"]
                 st.json(
-                    {
+                    source_fields
+                    if preview.get("invoice_month")
+                    else {
                         "Data": source_fields.get("Data", row["occurred_on"]),
                         "Valor": format_brl(row["amount_minor_units"]),
                         "Identificador": row["transaction_id"],
@@ -678,6 +718,12 @@ def _render_preview_and_confirmation(preview: dict, rules: list[CategorizationRu
                 "person": preview["person"],
                 "source_kind": preview["source_kind"],
                 "confirmed": "true",
+                "import_format": preview.get("import_format", "nubank_statement"),
+                **(
+                    {"invoice_month": preview["invoice_month"]}
+                    if preview.get("invoice_month")
+                    else {}
+                ),
             },
             files={"file": (preview["filename"], preview["content"], "text/csv")},
         )

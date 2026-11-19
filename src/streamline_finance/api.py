@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from calendar import monthrange
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from typing import Annotated
@@ -17,7 +18,9 @@ from streamline_finance.categorization import (
     suggest_category,
 )
 from streamline_finance.domain import Category, MovementType, Person, SourceKind
+from streamline_finance.importers.c6_invoice import preview_c6_invoice
 from streamline_finance.importers.nubank import ImportPreview, preview_nubank_csv
+from streamline_finance.importers.nubank_invoice import preview_nubank_invoice
 from streamline_finance.rules import HistoricalRuleError, load_expense_rules
 from streamline_finance.storage import (
     FinanceRepository,
@@ -316,7 +319,30 @@ def create_app(
         source_key: str,
         person: Person,
         source_kind: SourceKind,
+        import_format: str,
+        invoice_month: str | None,
     ) -> ImportPreview:
+        if import_format in {"c6_invoice", "nubank_invoice"}:
+            if source_kind is not SourceKind.CREDIT_CARD:
+                raise HTTPException(
+                    status_code=422, detail="Fatura exige origem de cartão de crédito"
+                )
+            try:
+                if invoice_month is None or len(invoice_month) != 7 or invoice_month[4] != "-":
+                    raise ValueError
+                date.fromisoformat(invoice_month + "-01")
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422, detail="Informe a competência da fatura como AAAA-MM"
+                ) from exc
+            parser = preview_c6_invoice if import_format == "c6_invoice" else preview_nubank_invoice
+            return replace(
+                parser(content, person=person, source_key=source_key),
+                invoice_format=import_format,
+                invoice_month=invoice_month,
+            )
+        if import_format != "nubank_statement" or invoice_month is not None:
+            raise HTTPException(status_code=422, detail="Formato ou competência inválidos")
         return preview_nubank_csv(
             content,
             source_key=source_key,
@@ -371,9 +397,13 @@ def create_app(
         source_key: Annotated[str, Form(min_length=1, max_length=100)],
         person: Annotated[Person, Form()],
         source_kind: Annotated[SourceKind, Form()] = SourceKind.BANK_ACCOUNT,
+        import_format: Annotated[str, Form()] = "nubank_statement",
+        invoice_month: Annotated[str | None, Form()] = None,
     ) -> PreviewResponse:
         content = await read_upload(file)
-        preview = parse_preview(content, source_key, person, source_kind)
+        preview = parse_preview(
+            content, source_key, person, source_kind, import_format, invoice_month
+        )
         return _preview_response(preview)
 
     @app.post("/imports/confirm", response_model=ImportConfirmationResponse)
@@ -385,6 +415,8 @@ def create_app(
         person: Annotated[Person, Form()],
         confirmed: Annotated[bool, Form()],
         source_kind: Annotated[SourceKind, Form()] = SourceKind.BANK_ACCOUNT,
+        import_format: Annotated[str, Form()] = "nubank_statement",
+        invoice_month: Annotated[str | None, Form()] = None,
     ) -> ImportConfirmationResponse:
         if not confirmed:
             raise HTTPException(
@@ -392,7 +424,9 @@ def create_app(
                 detail="Importação não gravada. Confira a prévia e confirme explicitamente.",
             )
         content = await read_upload(file)
-        preview = parse_preview(content, source_key, person, source_kind)
+        preview = parse_preview(
+            content, source_key, person, source_kind, import_format, invoice_month
+        )
         if not preview.can_confirm:
             raise HTTPException(
                 status_code=422,

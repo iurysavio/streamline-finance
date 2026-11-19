@@ -2,7 +2,7 @@
 
 ## Estado
 
-Sprint 5 aceita e Sprint 6 autorizada pelo usuário em 15/11/2026. **Implementação técnica concluída, aguardando validação local e aceite explícito do usuário para a Sprint 6 e o v0.**
+Sprint 5 aceita e Sprint 6 autorizada pelo usuário em 15/11/2026. **Sprint 6 e v0 aceitos explicitamente pelo usuário** antes da implementação da Sprint 7.
 
 ## Escopo e decisões
 
@@ -21,4 +21,4 @@ Sprint 5 aceita e Sprint 6 autorizada pelo usuário em 15/11/2026. **Implementa�
 - `git check-ignore -v data/db/finance.sqlite3 data/raw/example.csv data/backups/example/db/finance.sqlite3 data/historical/example.xlsx .venv/example`: todos ignorados.
 - `rtk git diff --check`: passou para arquivos rastreados; novos arquivos devem ser incluídos na próxima revisão do diff antes de eventual commit.
 
-Próximo passo: o usuário percorre o roteiro em `docs/manual/sprint-06-operation.md`, pratica recuperação isolada e aceita explicitamente a Sprint 6 ou solicita ajustes. Não iniciar outra sprint antes do aceite.
+Próximo passo: consultar `docs/handoffs/sprint-07/handoff.md` para a evolução de importação de faturas.

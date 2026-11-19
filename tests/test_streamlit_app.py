@@ -314,7 +314,11 @@ def test_trend_hover_uses_exact_brl_label():
 
 
 def test_expense_filters_apply_to_all_period_rows():
+    from datetime import date, timedelta
+
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=10).run()
+    today = date.today()
+    app.date_input(key="analysis_date_range").set_value((today - timedelta(days=270), today)).run()
     assert len(app.dataframe[0].value) > 10
     app.multiselect(key="expense-filter-Macro").select("Lazer").run()
     assert not app.exception

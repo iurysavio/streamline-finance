@@ -176,6 +176,52 @@ class FinanceRepository:
                 "WHERE source_key = ? AND content_sha256 = ?",
                 (normalized_source, digest),
             ).fetchone()
+            if preview.invoice_format is not None:
+                if preview.invoice_month is None or source_kind is not SourceKind.CREDIT_CARD:
+                    raise ImportRejectedError("Fatura exige cartão e competência")
+                existing_invoice = connection.execute(
+                    "SELECT batch_id FROM card_invoices WHERE source_key = ? AND invoice_month = ?",
+                    (normalized_source, preview.invoice_month),
+                ).fetchone()
+                if existing_invoice is not None and (
+                    existing_batch is None or existing_invoice["batch_id"] != existing_batch["id"]
+                ):
+                    raise ImportConflictError(
+                        "Já existe fatura para este cartão e competência; "
+                        "revise antes de substituir."
+                    )
+                if existing_batch is not None and (
+                    existing_invoice is None or existing_invoice["batch_id"] != existing_batch["id"]
+                ):
+                    raise ImportConflictError(
+                        "Arquivo já importado com outra competência ou formato."
+                    )
+                other_format = connection.execute(
+                    "SELECT 1 FROM card_invoices WHERE source_key = ? "
+                    "AND invoice_format != ? LIMIT 1",
+                    (normalized_source, preview.invoice_format),
+                ).fetchone()
+                if other_format is not None:
+                    raise ImportConflictError(
+                        "A identificação do cartão já foi usada com outro formato."
+                    )
+                if existing_batch is None:
+                    for row in preview.transactions:
+                        fields = json.dumps(
+                            dict(row.source_fields), ensure_ascii=False, separators=(",", ":")
+                        )
+                        overlap = connection.execute(
+                            "SELECT 1 FROM transactions t JOIN import_batch_transactions links "
+                            "ON links.transaction_id = t.id JOIN card_invoices i "
+                            "ON i.batch_id = links.batch_id "
+                            "WHERE i.source_key = ? AND t.source_fields_json = ? LIMIT 1",
+                            (normalized_source, fields),
+                        ).fetchone()
+                        if overlap:
+                            raise ImportConflictError(
+                                "Lançamento semelhante já existe em outra fatura; "
+                                "revisão manual necessária."
+                            )
             if existing_batch is not None:
                 if (
                     existing_batch["person"] != person.value
@@ -228,6 +274,13 @@ class FinanceRepository:
                 ),
             )
             batch_id = int(cursor.lastrowid)
+            if preview.invoice_format is not None:
+                connection.execute(
+                    "INSERT INTO card_invoices (batch_id, source_key, invoice_month, "
+                    "invoice_format) "
+                    "VALUES (?, ?, ?, ?)",
+                    (batch_id, normalized_source, preview.invoice_month, preview.invoice_format),
+                )
             imported_count = 0
             duplicate_count = 0
             for preview_row in preview.transactions:
@@ -718,6 +771,14 @@ class FinanceRepository:
                     macro TEXT NOT NULL,
                     micro TEXT NOT NULL,
                     PRIMARY KEY (macro, micro)
+                );
+
+                CREATE TABLE IF NOT EXISTS card_invoices (
+                    batch_id INTEGER PRIMARY KEY REFERENCES import_batches(id),
+                    source_key TEXT NOT NULL,
+                    invoice_month TEXT NOT NULL,
+                    invoice_format TEXT NOT NULL,
+                    UNIQUE (source_key, invoice_month)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_transactions_occurred_on

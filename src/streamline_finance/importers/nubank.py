@@ -53,6 +53,8 @@ class ImportPreview:
     transactions: tuple[PreviewTransaction, ...]
     errors: tuple[PreviewError, ...]
     skipped_blank_lines: tuple[int, ...]
+    invoice_format: str | None = None
+    invoice_month: str | None = None
 
     @property
     def can_confirm(self) -> bool:
