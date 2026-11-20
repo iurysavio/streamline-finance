@@ -77,7 +77,7 @@ def test_c6_card_preview_and_confirmation_require_month_and_preserve_existing_ba
     c6 = (
         "Data de Compra;Nome no Cartão;Final do Cartão;Categoria;Descrição;Parcela;"
         "Valor (em US$);Cotação (em R$);Valor (em R$)\n"
-        "03/09/2026;Fictício;0000;Casa;Loja;Única;0.00;0.00;12.34\n"
+        "03/07/2026;Fictício;0000;Casa;Loja;Única;0.00;0.00;12.34\n"
     ).encode()
     data = {
         "source_key": "synthetic-card",
@@ -114,6 +114,35 @@ def test_c6_card_preview_and_confirmation_require_month_and_preserve_existing_ba
         assert len(transactions) == 2
         assert {row["amount_minor_units"] for row in transactions} == {-200, -1234}
         assert all(row["movement_type"] == "pending" for row in transactions)
+        invoice_row = next(row for row in transactions if row["invoice_month"])
+        assert invoice_row["invoice_month"] == "2026-09"
+        assert invoice_row["occurred_on"] == "2026-07-03"
+        assert (
+            client.get("/reports/monthly-spending", params={"month": "2026-09"}).json()[
+                "transaction_count"
+            ]
+            == 0
+        )
+        transaction_id = next(row["transaction_id"] for row in transactions if row["invoice_month"])
+        assert (
+            client.post(
+                f"/transactions/synthetic-card/{transaction_id}/movement-type",
+                json={"movement_type": "expense", "confirmed": True},
+            ).status_code
+            == 200
+        )
+        assert (
+            client.get("/reports/monthly-spending", params={"month": "2026-09"}).json()[
+                "total_minor_units"
+            ]
+            == 1234
+        )
+        assert (
+            client.get("/reports/monthly-spending", params={"month": "2026-07"}).json()[
+                "total_minor_units"
+            ]
+            == 0
+        )
 
 
 def test_additive_invoice_migration_preserves_existing_database(tmp_path):
@@ -127,9 +156,9 @@ def test_additive_invoice_migration_preserves_existing_database(tmp_path):
             source_key="bank",
             content=content,
         )
+        before = repository.list_transactions()
         repository._connection.execute("DROP TABLE card_invoices")
         repository._connection.commit()
-        before = repository.list_transactions()
     with FinanceRepository(database) as repository:
         assert repository.list_transactions() == before
         assert (

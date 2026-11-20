@@ -33,6 +33,7 @@ from streamline_finance.ui_summary import (
     build_spending_trend,
     compare_spending_periods,
     format_brl,
+    in_reporting_range,
     top_expenses,
 )
 
@@ -86,6 +87,7 @@ class TransactionResponse(BaseModel):
     person: str
     source_kind: str
     occurred_on: str
+    invoice_month: str | None = None
     posted_on: str | None
     category: dict[str, str] | None
 
@@ -101,6 +103,12 @@ class MovementReviewRequest(BaseModel):
     confirmed: bool
     macro: str | None = Field(default=None, min_length=1, max_length=120)
     micro: str | None = Field(default=None, min_length=1, max_length=120)
+
+
+class ClassificationCorrectionRequest(MovementReviewRequest):
+    expected_movement_type: MovementType
+    expected_macro: str | None = Field(default=None, min_length=1, max_length=120)
+    expected_micro: str | None = Field(default=None, min_length=1, max_length=120)
 
 
 class CategoryReviewRequest(BaseModel):
@@ -209,6 +217,7 @@ class SpendingTrendResponse(BaseModel):
 class TopExpenseResponse(BaseModel):
     transaction_id: str
     occurred_on: str
+    invoice_month: str | None = None
     description: str
     person: str
     category_macro: str
@@ -542,6 +551,64 @@ def create_app(
         return _transaction_response(row)
 
     @app.post(
+        "/transactions/{source_key}/{transaction_id}/correction",
+        response_model=TransactionResponse,
+    )
+    def correct_classification(
+        request: Request,
+        source_key: str,
+        transaction_id: str,
+        body: ClassificationCorrectionRequest,
+    ) -> TransactionResponse:
+        if not body.confirmed:
+            raise HTTPException(status_code=409, detail="Confirmação explícita é necessária")
+        if (body.macro is None) != (body.micro is None) or (
+            (body.expected_macro is None) != (body.expected_micro is None)
+        ):
+            raise HTTPException(status_code=422, detail="Forneça macro e micro categoria juntos")
+        if body.movement_type is MovementType.EXPENSE and body.macro is None:
+            raise HTTPException(status_code=422, detail="Selecione macro e micro para a despesa")
+        if body.movement_type is not MovementType.EXPENSE and body.macro is not None:
+            raise HTTPException(status_code=422, detail="Somente despesas podem ter categoria")
+        try:
+            row = get_repository(request).correct_classification(
+                source_key,
+                transaction_id,
+                body.movement_type,
+                expected_movement_type=body.expected_movement_type,
+                expected_category=(
+                    Category(body.expected_macro, body.expected_micro)
+                    if body.expected_macro is not None and body.expected_micro is not None
+                    else None
+                ),
+                category=(
+                    Category(body.macro, body.micro)
+                    if body.macro is not None and body.micro is not None
+                    else None
+                ),
+                confirm=True,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Transação não encontrada") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return _transaction_response(row)
+
+    @app.get("/transactions/{source_key}/{transaction_id}/reviews")
+    def transaction_reviews(request: Request, source_key: str, transaction_id: str):
+        repository = get_repository(request)
+        try:
+            repository.get_transaction(transaction_id, source_key=source_key)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Transação não encontrada") from exc
+        return {
+            "reviews": [
+                {"previous_value": before, "new_value": after, "reviewed_at": timestamp}
+                for before, after, timestamp in repository.list_reviews(source_key, transaction_id)
+            ]
+        }
+
+    @app.post(
         "/transactions/{source_key}/{transaction_id}/category-suggestion",
         response_model=CategorySuggestionResponse,
     )
@@ -575,6 +642,15 @@ def create_app(
             ]
         }
 
+    @app.get("/categories/registered")
+    def list_registered_categories(request: Request):
+        return {
+            "categories": [
+                {**_category_response(category), "usage_count": count}
+                for category, count in get_repository(request).list_registered_categories()
+            ]
+        }
+
     @app.post("/categories")
     def add_category(request: Request, body: CategoryReviewRequest):
         if not body.confirmed:
@@ -584,6 +660,25 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"detail": "Categoria cadastrada"}
+
+    @app.delete("/categories")
+    def delete_category(
+        request: Request,
+        macro: Annotated[str, Query(min_length=1, max_length=120)],
+        micro: Annotated[str, Query(min_length=1, max_length=120)],
+        confirmed: bool = False,
+    ):
+        if not confirmed:
+            raise HTTPException(status_code=409, detail="Confirme a exclusão da categoria")
+        try:
+            get_repository(request).delete_category(Category(macro, micro))
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404, detail="Categoria cadastrada não encontrada"
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"detail": "Categoria removida"}
 
     @app.post(
         "/categories/historical-rules/preview",
@@ -761,6 +856,7 @@ def create_app(
                 TopExpenseResponse(
                     transaction_id=row.transaction_id,
                     occurred_on=row.occurred_on.isoformat(),
+                    invoice_month=row.invoice_month,
                     description=row.description,
                     person=row.person,
                     category_macro=row.category_macro,
@@ -818,8 +914,7 @@ def create_app(
             for row in transactions
             if row.movement_type is MovementType.EXPENSE
             and row.category is None
-            and (start is None or row.occurred_on >= start)
-            and (end is None or row.occurred_on <= end)
+            and (start is None or end is None or in_reporting_range(row, start, end))
             and (person is None or row.person is person)
         ]
         return UncategorizedCountResponse(count=len(uncategorized))
@@ -903,6 +998,7 @@ def _transaction_response(transaction) -> TransactionResponse:
         person=transaction.person.value,
         source_kind=transaction.source_kind.value,
         occurred_on=transaction.occurred_on.isoformat(),
+        invoice_month=transaction.invoice_month,
         posted_on=transaction.posted_on.isoformat() if transaction.posted_on else None,
         category=_category_response(transaction.category),
     )

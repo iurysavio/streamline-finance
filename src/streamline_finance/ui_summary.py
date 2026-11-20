@@ -36,6 +36,7 @@ class TopExpense:
     category_macro: str
     category_micro: str
     amount_minor_units: int
+    invoice_month: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,9 +69,10 @@ def build_spending_trend(
 
     totals: dict[tuple[str, str], int] = defaultdict(int)
     for row in transactions:
-        if row.movement_type.value != "expense" or not start <= row.occurred_on <= end:
+        report_date = _report_date(row)
+        if row.movement_type.value != "expense" or not in_reporting_range(row, start, end):
             continue
-        period = _period_key(row.occurred_on, granularity)
+        period = _period_key(report_date, granularity)
         if dimension == "total":
             group = "Todos"
         elif dimension == "person":
@@ -104,7 +106,7 @@ def build_spending_summary(
         row
         for row in transactions
         if row.movement_type.value == "expense"
-        and row.occurred_on.strftime("%Y-%m") == month
+        and _report_date(row).strftime("%Y-%m") == month
         and (person is None or row.person.value == person)
     ]
     # Stored expense rows are signed cash movements (purchases negative, refunds positive).
@@ -161,7 +163,7 @@ def top_expenses(
         raise ValueError("limit must be between 1 and 100")
     rows: list[TopExpense] = []
     for row in transactions:
-        if row.movement_type.value != "expense" or not start <= row.occurred_on <= end:
+        if row.movement_type.value != "expense" or not in_reporting_range(row, start, end):
             continue
         if person is not None and row.person.value != person:
             continue
@@ -179,6 +181,7 @@ def top_expenses(
                 category_macro=row.category.macro if row.category else "Sem categoria",
                 category_micro=row.category.micro if row.category else "Revisar",
                 amount_minor_units=-amount,
+                invoice_month=row.invoice_month if isinstance(row, StoredTransaction) else None,
             )
         )
     return tuple(
@@ -200,9 +203,9 @@ def category_highlights(transactions, *, start: date, end: date):
             continue
         target = (
             current
-            if start <= row.occurred_on <= end
+            if in_reporting_range(row, start, end)
             else previous
-            if previous_start <= row.occurred_on <= previous_end
+            if in_reporting_range(row, previous_start, previous_end)
             else None
         )
         if target is not None:
@@ -286,7 +289,7 @@ def _period_spending(
         if (
             row.movement_type.value == "expense"
             and row.person.value == person
-            and start <= row.occurred_on <= end
+            and in_reporting_range(row, start, end)
         ):
             amount = (
                 row.amount_minor_units
@@ -304,3 +307,17 @@ def _period_key(value: date, granularity: str) -> str:
         return value.strftime("%Y-%m")
     week_start = value - timedelta(days=value.weekday())
     return week_start.isoformat()
+
+
+def _report_date(row: StoredTransaction | Transaction) -> date:
+    """Use statement competence for reports while preserving the original purchase date."""
+    month = row.invoice_month if isinstance(row, StoredTransaction) else None
+    return date.fromisoformat(f"{month}-01") if month is not None else row.occurred_on
+
+
+def in_reporting_range(row: StoredTransaction | Transaction, start: date, end: date) -> bool:
+    """Date-filter bank transactions by day and card invoices by inclusive statement month."""
+    month = row.invoice_month if isinstance(row, StoredTransaction) else None
+    if month is not None:
+        return start.strftime("%Y-%m") <= month <= end.strftime("%Y-%m")
+    return start <= row.occurred_on <= end

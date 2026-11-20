@@ -33,6 +33,50 @@ def test_monthly_spending_summary_uses_integer_cents_and_only_confirmed_expenses
     assert summary.by_category == {("Needs", "Food"): 1734}
 
 
+def test_invoice_transactions_use_billing_month_for_reports_but_keep_purchase_date():
+    installment = transaction(
+        "invoice-installment", -2500, MovementType.EXPENSE, "self", "2026-07-10", "Needs", "Food"
+    )
+    installment = transaction_with_invoice_month(installment, "2026-09")
+
+    summary = build_spending_summary([installment], month="2026-09")
+    trend = build_spending_trend(
+        [installment],
+        start=date(2026, 9, 1),
+        end=date(2026, 9, 30),
+        granularity="month",
+        dimension="total",
+    )
+    selected = top_expenses([installment], start=date(2026, 9, 1), end=date(2026, 9, 30))
+
+    assert summary.total_minor_units == 2500
+    assert trend[0].period == "2026-09"
+    assert selected[0].occurred_on == date(2026, 7, 10)
+    assert (
+        top_expenses([installment], start=date(2026, 9, 15), end=date(2026, 9, 30))[0].invoice_month
+        == "2026-09"
+    )
+    partial_month = build_spending_trend(
+        [installment],
+        start=date(2026, 9, 15),
+        end=date(2026, 9, 30),
+        granularity="month",
+        dimension="total",
+    )
+    assert partial_month[0].amount_minor_units == 2500
+
+
+def test_invoice_month_query_excludes_purchase_month_and_keeps_bank_effective_date():
+    purchase = transaction("purchase", -2500, MovementType.EXPENSE, "self", "2026-07-10", "N", "M")
+    installment = transaction_with_invoice_month(purchase, "2026-09")
+    bank = transaction("bank", -1000, MovementType.EXPENSE, "self", "2026-09-15", "N", "M")
+
+    july = build_spending_summary([installment], month="2026-07")
+    september = build_spending_summary([installment, bank], month="2026-09")
+    assert july.total_minor_units == 0
+    assert september.total_minor_units == 3500
+
+
 def test_summary_can_filter_by_person_and_preserves_net_refunds() -> None:
     rows = [
         transaction("purchase", -1000, MovementType.EXPENSE, "self", "2026-01-03", "Needs", "Food"),
@@ -227,3 +271,9 @@ def transaction(
         category=Category(macro, micro) if macro is not None and micro is not None else None,
         source_kind=SourceKind.BANK_ACCOUNT,
     )
+
+
+def transaction_with_invoice_month(row: StoredTransaction, invoice_month: str) -> StoredTransaction:
+    from dataclasses import replace
+
+    return replace(row, invoice_month=invoice_month)

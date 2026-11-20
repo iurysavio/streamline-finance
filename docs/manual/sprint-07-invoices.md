@@ -4,7 +4,7 @@
 
 - A implementação da Sprint 7 exige aceite do usuário antes da Sprint 8. Faça backup privado do banco e arquivos originais conforme `sprint-06-operation.md` antes de atualizar uma instalação com dados. A primeira abertura atualiza o esquema SQLite de forma aditiva; a migração foi testada em banco sintético, não no seu backup real.
 - **A conciliação entre pagamento no extrato e total da fatura ainda não está implementada.** Se o pagamento já foi confirmado como despesa, revisar compras da fatura como despesas pode duplicar os gastos. O mecanismo anterior compara pagamento com compra individual e não deve ser tratado como conciliação de fatura.
-- Relatórios ainda usam data de ocorrência/compra; a seleção de competência será implementada na Sprint 8. A competência selecionada aqui fica associada à fatura, mas ainda não filtra os relatórios.
+- Relatórios usam a competência da fatura para distribuir todos os lançamentos do cartão pelo mês da fatura. Selecionar qualquer intervalo que cruze esse mês inclui a fatura inteira; transações bancárias continuam limitadas pelas datas exatas. A data original de compra continua preservada e aparece na tabela junto à competência. Nos gráficos diários/semanais os totais da fatura ficam no primeiro dia do mês; use Mês a mês para compará-los.
 - Os formatos são específicos dos CSVs examinados: C6 com cabeçalhos em português, separados por `;`, e Nubank com `date,title,amount`. Outros layouts são recusados. Não editar originais nem compartilhar linhas pessoais em issues, logs ou fixtures.
 - A seleção de formato de fatura está no modo **Meus dados locais**; o importador do sandbox Demo continua aceitando somente extrato bancário sintético.
 
@@ -22,6 +22,12 @@
 - Arquivo diferente para o mesmo cartão e competência é bloqueado. Uma linha original idêntica já importada em outra competência do mesmo cartão também bloqueia a importação inteira, inclusive quando poderia ser uma compra legítima. Não há ainda fluxo de substituição, mesclagem ou liberação: preserve os arquivos e peça revisão.
 - Alterar a identificação do cartão pode contornar essas proteções; mantenha o mesmo código para o mesmo cartão e não reutilize um código para cartões ou formatos diferentes.
 - Data, competência e sinal dependem do CSV e da confirmação do usuário. Parcelas, juros, pagamentos, créditos e estornos não são classificados automaticamente. Entradas em moeda estrangeira mantêm os campos originais e usam o valor em reais informado no CSV, sem conversão calculada pelo app.
+
+## Corrigir categorias cadastradas
+
+- Em **Revisar movimentações → Excluir categoria cadastrada**, selecione a categoria criada por engano e confirme. A lista mostra quantas movimentações a usam; categorias em uso não podem ser excluídas para preservar os relatórios e o histórico.
+- Categorias importadas da planilha ou derivadas de lançamentos não aparecem como opções de exclusão do catálogo. Corrija categorias da planilha na fonte antes de atualizar suas regras. A reclassificação de lançamentos existentes ainda requer uma ação separada e auditada.
+- No modo Demo, categorias criadas na sessão também podem ser removidas se não tiverem sido usadas.
 
 ## Verificação
 

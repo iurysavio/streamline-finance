@@ -178,7 +178,7 @@ def test_review_page_shows_pending_transactions_and_manual_category_confirmation
             app.radio(key="data_mode_label").set_value("Meus dados locais").run()
             app.switch_page("pages/3_Revisar.py").run()
             assert not app.exception
-            assert len(app.expander) == 3
+            assert len(app.expander) == 4
             assert any(item.label == "Macro categoria" for item in app.selectbox)
             assert any(button.label == "Confirmar natureza e categoria" for button in app.button)
     finally:
@@ -323,6 +323,22 @@ def test_expense_filters_apply_to_all_period_rows():
     app.multiselect(key="expense-filter-Macro").select("Lazer").run()
     assert not app.exception
     assert set(app.dataframe[0].value["Macro"]) == {"Lazer"}
+
+
+def test_demo_category_can_be_deleted_if_unused():
+    app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=10).run()
+    app.switch_page("pages/3_Revisar.py").run()
+    app.text_input(key="new-category-macro").set_value("Temporária").run()
+    app.text_input(key="new-category-micro").set_value("Teste").run()
+    app.checkbox(key="new-category-confirm").check().run()
+    app.button[0].click().run()
+    assert any(category.macro == "Temporária" for category in app.session_state["demo_categories"])
+    app.selectbox(key="delete-category-choice").select("Temporária / Teste · em uso: 0").run()
+    app.checkbox(key="delete-category-confirm").check().run()
+    next(button for button in app.button if button.label == "Excluir categoria").click().run()
+    assert not any(
+        category.macro == "Temporária" for category in app.session_state["demo_categories"]
+    )
 
 
 def test_demo_csv_upload_stays_in_session_memory_and_never_enters_sqlite() -> None:

@@ -33,6 +33,7 @@ from streamline_finance.ui_summary import (
     category_highlights,
     compare_spending_periods,
     format_brl,
+    in_reporting_range,
     top_expenses,
 )
 
@@ -121,6 +122,7 @@ def _real_transactions() -> tuple[StoredTransaction, ...] | None:
                 posted_on=date.fromisoformat(row["posted_on"]) if row["posted_on"] else None,
                 category=category,
                 source_kind=SourceKind(row["source_kind"]),
+                invoice_month=row.get("invoice_month"),
             )
         )
     return tuple(transactions)
@@ -245,6 +247,11 @@ def render_analysis_page() -> None:
     else:
         chart = _trend_chart(trend, granularity, dimension)
         st.plotly_chart(chart, width="stretch", config={"scrollZoom": False, "displaylogo": False})
+        if granularity != "month" and any(row.invoice_month for row in filtered):
+            st.caption(
+                "Lançamentos de fatura são agrupados no primeiro dia da competência; "
+                "use Mês a mês para compará-los."
+            )
         if dimension == "person":
             st.caption("Selecione uma pessoa no filtro para isolar seus gastos.")
         elif dimension in {"macro", "micro"}:
@@ -322,7 +329,7 @@ def uncategorized_expenses(
         for row in transactions
         if row.movement_type is MovementType.EXPENSE
         and row.category is None
-        and start <= row.occurred_on <= end
+        and in_reporting_range(row, start, end)
         and (person is None or row.person.value == person)
     )
 
@@ -365,6 +372,7 @@ def _top_expense_rows(expenses) -> list[dict[str, str]]:
                 else occurred_on,
                 "Tipo de pagamento": payment,
                 "Descrição": description,
+                "Competência": get("invoice_month") or "",
                 "Pessoa": _person_label(get("person")),
                 "Macro": get("category_macro"),
                 "Micro": get("category_micro"),
@@ -387,6 +395,7 @@ def _expense_table(expenses, start: date, end: date) -> None:
     rows = _top_expense_rows(expenses)
     frame = pd.DataFrame(rows)
     frame["_centavos"] = [item.amount_minor_units for item in expenses]
+    frame["_invoice_month"] = [item.invoice_month or "" for item in expenses]
     if st.session_state.get("expense_date_bounds") != (start, end):
         st.session_state.pop("expense_dates", None)
         st.session_state["expense_date_bounds"] = (start, end)
@@ -403,7 +412,7 @@ def _expense_table(expenses, start: date, end: date) -> None:
             column: st.multiselect(
                 column, sorted(frame[column].unique()), key=f"expense-filter-{column}"
             )
-            for column in ("Tipo de pagamento", "Pessoa", "Macro", "Micro")
+            for column in ("Tipo de pagamento", "Pessoa", "Macro", "Micro", "Competência")
         }
         minimum = st.number_input(
             "Valor mínimo (R$)", min_value=0.0, value=0.0, step=1.0, key="expense_min"
@@ -416,7 +425,13 @@ def _expense_table(expenses, start: date, end: date) -> None:
             key="expense_max",
         )
     if isinstance(dates, tuple) and len(dates) == 2:
-        frame = frame[frame["Data"].between(dates[0].isoformat(), dates[1].isoformat())]
+        bank_rows = frame["_invoice_month"].eq("") & frame["Data"].between(
+            dates[0].isoformat(), dates[1].isoformat()
+        )
+        invoice_rows = frame["_invoice_month"].between(
+            dates[0].strftime("%Y-%m"), dates[1].strftime("%Y-%m")
+        ) & frame["_invoice_month"].ne("")
+        frame = frame[bank_rows | invoice_rows]
     if text:
         frame = frame[frame["Descrição"].str.contains(text, case=False, regex=False)]
     for column, selected in selections.items():
@@ -428,7 +443,9 @@ def _expense_table(expenses, start: date, end: date) -> None:
     if maximum:
         frame = frame[frame["_centavos"] <= int(Decimal(str(maximum)) * 100)]
     st.caption(f"{len(frame)} despesa(s) encontrada(s).")
-    st.dataframe(frame.drop(columns="_centavos"), width="stretch", hide_index=True)
+    st.dataframe(
+        frame.drop(columns=["_centavos", "_invoice_month"]), width="stretch", hide_index=True
+    )
 
 
 def _variation_card_presentation(
@@ -804,15 +821,24 @@ def _render_demo_review_controls() -> None:
 
 def _render_real_review() -> None:
     only_uncategorized = st.session_state.pop("review_uncategorized_only", False)
+    view = (
+        "Despesas sem categoria"
+        if only_uncategorized
+        else st.radio("Mostrar", ("Pendentes", "Já revisadas"), horizontal=True, key="review_view")
+    )
     st.header(
-        "Revisar despesas sem categoria" if only_uncategorized else "Revisar movimentos pendentes"
+        "Revisar despesas sem categoria"
+        if only_uncategorized
+        else "Corrigir movimentações já revisadas"
+        if view == "Já revisadas"
+        else "Revisar movimentos pendentes"
     )
     historical_rules = _review_rules()
     categories = st.session_state.get("review_categories", set())
     _category_management(categories, demo=False)
     response = _api_get(
         "/transactions",
-        **({} if only_uncategorized else {"movement_type": "pending"}),
+        **({} if only_uncategorized or view == "Já revisadas" else {"movement_type": "pending"}),
         **({"uncategorized_only": "true"} if only_uncategorized else {}),
     )
     if response is None:
@@ -822,6 +848,11 @@ def _render_real_review() -> None:
         st.error("Não foi possível carregar movimentos para revisão.")
         return
     rows = response.json()["transactions"]
+    if view == "Já revisadas":
+        _render_confirmed_corrections(
+            [row for row in rows if row["movement_type"] != "pending"], categories
+        )
+        return
     if not rows:
         st.info("Nenhum movimento pendente para revisão.")
         return
@@ -887,6 +918,133 @@ def _render_real_review() -> None:
                         },
                     )
                 _show_action_result(response, "Natureza salva.")
+
+
+def _render_confirmed_corrections(rows: list[dict], categories: set[Category]) -> None:
+    st.caption(
+        "Filtre e corrija uma movimentação por vez; os lançamentos originais são preservados."
+    )
+    months = sorted({row["occurred_on"][:7] for row in rows}, reverse=True)
+    month = st.selectbox("Mês da movimentação", ("Todos", *months), key="correction-month")
+    person = st.selectbox(
+        "Pessoa da movimentação", ("Todos", *_person_map()), key="correction-person"
+    )
+    origin = st.selectbox(
+        "Origem da movimentação",
+        ("Todas", *sorted({row["source_key"] for row in rows})),
+        key="correction-origin",
+    )
+    kind = st.selectbox(
+        "Natureza atual",
+        ("Todas", "Despesa", "Entrada", "Transferência"),
+        key="correction-kind",
+    )
+    search = st.text_input("Buscar descrição da movimentação", key="correction-search").casefold()
+    kind_code = {"Despesa": "expense", "Entrada": "income", "Transferência": "transfer"}
+    filtered = [
+        row
+        for row in rows
+        if (month == "Todos" or row["occurred_on"].startswith(month))
+        and (person == "Todos" or row["person"] == _person_map()[person].value)
+        and (origin == "Todas" or row["source_key"] == origin)
+        and (kind == "Todas" or row["movement_type"] == kind_code[kind])
+        and search in row["description"].casefold()
+    ]
+    st.caption(f"{len(filtered)} movimentação(ões) encontrada(s).")
+    if not filtered:
+        st.info("Nenhuma movimentação revisada com esses filtros.")
+        return
+    row = st.selectbox(
+        "Movimentação já revisada",
+        filtered,
+        format_func=lambda item: (
+            f"{item['occurred_on']} · {item['description']} · "
+            f"{item['source_key']} · {format_brl(item['amount_minor_units'])}"
+        ),
+        key="correction-transaction",
+    )
+    row_key = f"{row['source_key']}-{row['transaction_id']}"
+    snapshot_key = f"correction-snapshot-{row_key}"
+    if st.button("Recarregar classificação", key=f"correct-reload-{row_key}"):
+        for key in (
+            snapshot_key,
+            f"correct-movement-{row_key}",
+            f"macro-correction-{row_key}",
+            f"micro-correction-{row_key}",
+            f"correct-ack-{row_key}",
+        ):
+            st.session_state.pop(key, None)
+        st.rerun()
+    snapshot = st.session_state.setdefault(
+        snapshot_key, {"movement_type": row["movement_type"], "category": row["category"]}
+    )
+    current_type = snapshot["movement_type"]
+    current_category = snapshot["category"]
+    st.write(
+        f"Valor original: {format_brl(row['amount_minor_units'])} · Data: {row['occurred_on']}"
+    )
+    if row["invoice_month"]:
+        st.write(f"Competência da fatura: {row['invoice_month']}")
+    st.write(
+        f"Classificação atual: {current_type} · "
+        f"{current_category['macro']} / {current_category['micro']}"
+        if current_category
+        else f"Classificação atual: {current_type} · Sem categoria"
+    )
+    movement_key = f"correct-movement-{row_key}"
+    labels = {"expense": "Despesa", "income": "Entrada", "transfer": "Transferência"}
+    st.session_state.setdefault(movement_key, labels[current_type])
+    selected_kind = st.selectbox("Nova natureza", tuple(labels.values()), key=movement_key)
+    movement_type = {label: code for code, label in labels.items()}[selected_kind]
+    macro = micro = None
+    if movement_type == "expense":
+        macro_key = f"macro-correction-{row_key}"
+        micro_key = f"micro-correction-{row_key}"
+        if current_category:
+            st.session_state.setdefault(macro_key, current_category["macro"])
+            st.session_state.setdefault(micro_key, current_category["micro"])
+        macro, micro = _category_selectors(categories, f"correction-{row_key}")
+    old_spending = -row["amount_minor_units"] if current_type == "expense" else 0
+    new_spending = -row["amount_minor_units"] if movement_type == "expense" else 0
+    st.write(f"Variação do gasto no período: {format_brl(new_spending - old_spending)}")
+    if (
+        movement_type == "expense"
+        and current_category
+        and (macro, micro) != (current_category["macro"], current_category["micro"])
+    ):
+        st.caption("A correção também muda a distribuição por categoria.")
+    reviews = _api_get(f"/transactions/{row['source_key']}/{row['transaction_id']}/reviews")
+    if reviews is not None and reviews.status_code == 200:
+        with st.expander("Histórico de revisões"):
+            st.dataframe(reviews.json()["reviews"], hide_index=True)
+    confirmed = st.checkbox("Confirmo esta correção", key=f"correct-ack-{row_key}")
+    if st.button("Salvar correção", disabled=not confirmed, key=f"correct-save-{row_key}"):
+        if movement_type == "expense" and (not macro or not micro):
+            st.warning("Selecione macro e microcategoria antes de salvar a despesa.")
+            return
+        expected = current_category or {}
+        response = _api_post(
+            f"/transactions/{row['source_key']}/{row['transaction_id']}/correction",
+            json={
+                "expected_movement_type": current_type,
+                "expected_macro": expected.get("macro"),
+                "expected_micro": expected.get("micro"),
+                "movement_type": movement_type,
+                "macro": macro,
+                "micro": micro,
+                "confirmed": True,
+            },
+        )
+        if response is not None and response.status_code == 200:
+            for key in (
+                snapshot_key,
+                movement_key,
+                f"macro-correction-{row_key}",
+                f"micro-correction-{row_key}",
+                f"correct-ack-{row_key}",
+            ):
+                st.session_state.pop(key, None)
+        _show_action_result(response, "Classificação corrigida e registrada no histórico.")
 
 
 def _review_rules() -> list[CategorizationRule]:
@@ -1008,6 +1166,60 @@ def _category_management(categories: set[Category], *, demo: bool) -> None:
                     "/categories", json={"macro": macro, "micro": micro, "confirmed": True}
                 )
                 _show_action_result(response, "Categoria cadastrada.")
+    with st.expander("Excluir categoria cadastrada"):
+        if demo:
+            registered = [
+                (category, sum(row.category == category for row in _demo_transactions()))
+                for category in st.session_state.get("demo_categories", [])
+            ]
+        else:
+            response = _api_get("/categories/registered")
+            if response is None or response.status_code != 200:
+                st.warning("Não foi possível carregar as categorias cadastradas.")
+                return
+            registered = [
+                (Category(row["macro"], row["micro"]), row["usage_count"])
+                for row in response.json()["categories"]
+            ]
+        if not registered:
+            st.caption("Não há categorias cadastradas para excluir.")
+            return
+        labels = {
+            f"{category.macro} / {category.micro} · em uso: {count}": (category, count)
+            for category, count in registered
+        }
+        selected_label = st.selectbox("Categoria", tuple(labels), key="delete-category-choice")
+        selected, usage_count = labels[selected_label]
+        if usage_count:
+            st.warning(
+                f"A categoria está vinculada a {usage_count} movimentação(ões) "
+                "e não pode ser excluída."
+            )
+        confirmed = st.checkbox(
+            "Confirmo a exclusão desta categoria não utilizada", key="delete-category-confirm"
+        )
+        if st.button("Excluir categoria", disabled=bool(usage_count) or not confirmed):
+            if demo:
+                st.session_state["demo_categories"] = [
+                    category
+                    for category in st.session_state.get("demo_categories", [])
+                    if category != selected
+                ]
+                st.rerun()
+            else:
+                try:
+                    response = httpx.delete(
+                        f"{_api_url()}/categories",
+                        params={
+                            "macro": selected.macro,
+                            "micro": selected.micro,
+                            "confirmed": "true",
+                        },
+                        timeout=10.0,
+                    )
+                except httpx.HTTPError:
+                    response = None
+                _show_action_result(response, "Categoria excluída.")
 
 
 def _historical_workbook_path() -> Path | None:

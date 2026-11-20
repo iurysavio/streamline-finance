@@ -71,6 +71,7 @@ class StoredTransaction:
     posted_on: date | None
     category: Category | None
     source_kind: SourceKind
+    invoice_month: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,7 +359,9 @@ class FinanceRepository:
     @_serialized
     def list_transactions(self) -> tuple[StoredTransaction, ...]:
         rows = self._connection.execute(
-            "SELECT * FROM transactions ORDER BY occurred_on, id"
+            "SELECT t.*, i.invoice_month FROM transactions t "
+            "LEFT JOIN card_invoices i ON i.batch_id = t.import_batch_id "
+            "ORDER BY t.occurred_on, t.id"
         ).fetchall()
         return tuple(_stored_transaction(row) for row in rows)
 
@@ -370,6 +373,15 @@ class FinanceRepository:
             "WHERE category_macro IS NOT NULL AND category_micro IS NOT NULL"
         ).fetchall()
         return tuple(Category(row[0], row[1]) for row in rows)
+
+    @_serialized
+    def list_registered_categories(self) -> tuple[tuple[Category, int], ...]:
+        rows = self._connection.execute(
+            "SELECT c.macro, c.micro, COUNT(t.id) AS usage_count FROM categories c "
+            "LEFT JOIN transactions t ON t.category_macro = c.macro "
+            "AND t.category_micro = c.micro GROUP BY c.macro, c.micro ORDER BY c.macro, c.micro"
+        ).fetchall()
+        return tuple((Category(row["macro"], row["micro"]), row["usage_count"]) for row in rows)
 
     @_serialized
     def add_category(self, category: Category) -> None:
@@ -390,6 +402,22 @@ class FinanceRepository:
             self._connection.execute(
                 "INSERT INTO categories (macro, micro) VALUES (?, ?)", (macro, micro)
             )
+
+    @_serialized
+    def delete_category(self, category: Category) -> None:
+        with self._connection:
+            usage_count = self._connection.execute(
+                "SELECT COUNT(*) FROM transactions WHERE category_macro = ? AND category_micro = ?",
+                (category.macro, category.micro),
+            ).fetchone()[0]
+            if usage_count:
+                raise ValueError(f"Categoria em uso por {usage_count} movimentação(ões)")
+            cursor = self._connection.execute(
+                "DELETE FROM categories WHERE macro = ? AND micro = ?",
+                (category.macro, category.micro),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError("registered category not found")
 
     def insert_demo_transactions(self, transactions: Iterable[Transaction]) -> None:
         """Write generated demo rows only; prevents demo rows from mixing with personal data."""
@@ -429,8 +457,8 @@ class FinanceRepository:
     @_serialized
     def list_demo_transactions(self) -> tuple[StoredTransaction, ...]:
         rows = self._connection.execute(
-            "SELECT * FROM transactions WHERE source_key = 'demo-generated' "
-            "ORDER BY occurred_on, id"
+            "SELECT t.*, NULL AS invoice_month FROM transactions t "
+            "WHERE t.source_key = 'demo-generated' ORDER BY t.occurred_on, t.id"
         ).fetchall()
         return tuple(_stored_transaction(row) for row in rows)
 
@@ -440,7 +468,9 @@ class FinanceRepository:
     ) -> StoredTransaction:
         if source_key is None:
             rows = self._connection.execute(
-                "SELECT * FROM transactions WHERE external_id = ? ORDER BY id LIMIT 2",
+                "SELECT t.*, i.invoice_month FROM transactions t "
+                "LEFT JOIN card_invoices i ON i.batch_id = t.import_batch_id "
+                "WHERE t.external_id = ? ORDER BY t.id LIMIT 2",
                 (external_id,),
             ).fetchall()
             if not rows:
@@ -450,7 +480,9 @@ class FinanceRepository:
             row = rows[0]
         else:
             row = self._connection.execute(
-                "SELECT * FROM transactions WHERE source_key = ? AND external_id = ?",
+                "SELECT t.*, i.invoice_month FROM transactions t "
+                "LEFT JOIN card_invoices i ON i.batch_id = t.import_batch_id "
+                "WHERE t.source_key = ? AND t.external_id = ?",
                 (source_key, external_id),
             ).fetchone()
             if row is None:
@@ -566,6 +598,87 @@ class FinanceRepository:
         return self.confirm_category(source_key, external_id, category, confirm=True)
 
     @_serialized
+    def correct_classification(
+        self,
+        source_key: str,
+        external_id: str,
+        movement_type: MovementType,
+        *,
+        expected_movement_type: MovementType,
+        expected_category: Category | None,
+        category: Category | None,
+        confirm: bool = False,
+    ) -> StoredTransaction:
+        """Correct a confirmed movement atomically; retain originals and audit every change."""
+        if not confirm:
+            raise ValueError("correction requires explicit confirmation")
+        if movement_type is MovementType.PENDING or expected_movement_type is MovementType.PENDING:
+            raise ValueError("only confirmed movements can be corrected")
+        if category is not None and movement_type is not MovementType.EXPENSE:
+            raise ValueError("only an expense can have an expense category")
+        if movement_type is MovementType.EXPENSE and category is None:
+            raise ValueError("choose macro and micro category for the expense")
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            row = self._connection.execute(
+                "SELECT id, movement_type, category_macro, category_micro FROM transactions "
+                "WHERE source_key = ? AND external_id = ?",
+                (source_key, external_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError("transaction not found")
+            current_category = (
+                Category(row["category_macro"], row["category_micro"])
+                if row["category_macro"] is not None
+                else None
+            )
+            if (
+                row["movement_type"] != expected_movement_type.value
+                or current_category != expected_category
+            ):
+                raise ValueError("classification changed; reload before confirming")
+            if movement_type is expected_movement_type and category == expected_category:
+                raise ValueError("classification has not changed")
+            timestamp = _now()
+            cursor = self._connection.execute(
+                "UPDATE transactions SET movement_type = ?, category_macro = ?, "
+                "category_micro = ?, reviewed_at = ? WHERE id = ? AND movement_type = ? "
+                "AND category_macro IS ? AND category_micro IS ?",
+                (
+                    movement_type.value,
+                    category.macro if category else None,
+                    category.micro if category else None,
+                    timestamp,
+                    row["id"],
+                    expected_movement_type.value,
+                    expected_category.macro if expected_category else None,
+                    expected_category.micro if expected_category else None,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("classification changed; reload before confirming")
+            events = []
+            if movement_type is not expected_movement_type:
+                events.append((expected_movement_type.value, movement_type.value))
+            if category != expected_category:
+                events.append(
+                    (
+                        f"category:{expected_category.macro}/{expected_category.micro}"
+                        if expected_category
+                        else "category:pending",
+                        f"category:{category.macro}/{category.micro}"
+                        if category
+                        else "category:pending",
+                    )
+                )
+            self._connection.executemany(
+                "INSERT INTO transaction_reviews "
+                "(transaction_id, previous_value, new_value, reviewed_at) VALUES (?, ?, ?, ?)",
+                ((row["id"], before, after, timestamp) for before, after in events),
+            )
+        return self.get_transaction(external_id, source_key=source_key)
+
+    @_serialized
     def list_reviews(self, source_key: str, external_id: str) -> tuple[tuple[str, str, str], ...]:
         rows = self._connection.execute(
             """SELECT r.previous_value, r.new_value, r.reviewed_at
@@ -578,8 +691,9 @@ class FinanceRepository:
     @_serialized
     def transactions_for_import(self, batch_id: int) -> tuple[StoredTransaction, ...]:
         rows = self._connection.execute(
-            """SELECT t.* FROM import_batch_transactions link
+            """SELECT t.*, i.invoice_month FROM import_batch_transactions link
                JOIN transactions t ON t.id = link.transaction_id
+               LEFT JOIN card_invoices i ON i.batch_id = t.import_batch_id
                WHERE link.batch_id = ? ORDER BY t.id""",
             (batch_id,),
         ).fetchall()
@@ -833,6 +947,7 @@ def _stored_transaction(row: sqlite3.Row) -> StoredTransaction:
             else None
         ),
         source_kind=SourceKind(row["source_kind"]),
+        invoice_month=row["invoice_month"] if "invoice_month" in row.keys() else None,
     )
 
 

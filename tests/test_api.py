@@ -68,6 +68,51 @@ def test_category_catalog_requires_confirmation_and_rejects_normalized_duplicate
     assert client.get("/categories").headers["cache-control"] == "no-store"
 
 
+def test_category_can_only_be_deleted_when_unused_and_requires_confirmation(tmp_path):
+    client, repository = client_for(tmp_path)
+    category = {"macro": "Casa", "micro": "Mercado", "confirmed": True}
+    assert client.post("/categories", json=category).status_code == 200
+    assert (
+        client.delete("/categories", params={"macro": "Casa", "micro": "Mercado"}).status_code
+        == 409
+    )
+    assert (
+        client.delete(
+            "/categories", params={"macro": "Casa", "micro": "Mercado", "confirmed": False}
+        ).status_code
+        == 409
+    )
+    deleted = client.delete(
+        "/categories", params={"macro": "Casa", "micro": "Mercado", "confirmed": True}
+    )
+    assert deleted.status_code == 200
+    assert client.get("/categories").json()["categories"] == []
+
+    from streamline_finance.domain import Category, MovementType
+
+    content = CSV_VALID
+    from streamline_finance.importers.nubank import preview_nubank_csv
+
+    repository.confirm_import(
+        preview_nubank_csv(content, person=Person.SELF, source_key="bank"),
+        source_key="bank",
+        content=content,
+    )
+    repository.review_movement_type(
+        "bank",
+        "api-synthetic-001",
+        MovementType.EXPENSE,
+        confirm=True,
+        category=Category("Casa", "Mercado"),
+    )
+    assert (
+        client.delete(
+            "/categories", params={"macro": "Casa", "micro": "Mercado", "confirmed": True}
+        ).status_code
+        == 409
+    )
+
+
 def test_invalid_preview_returns_safe_errors_and_confirmation_is_rejected(tmp_path) -> None:
     client, repository = client_for(tmp_path)
     preview_response = client.post(
